@@ -1,0 +1,16 @@
+# 版本约束：安装评测依赖时，禁止 pip 顺手升级项目主依赖
+# 用法：pip install -r evaluation\requirements-eval.txt -c evaluation\constraints-eval.txt
+# 说明：文件里出现即被钉死。不做这一步，ragas 可能把 langchain-core 升到 0.2+，
+#      连带 pydantic / numpy 一起变，项目立刻跑不起来（numpy 必须 <2，见 requirements.txt）。
+
+langchain==0.1.20
+langchain-core==0.1.53
+langchain-community==0.0.38
+langchain-chroma==0.1.4
+langchain-text-splitters==0.0.2
+chromadb==0.4.24
+chroma-hnswlib==0.7.3
+numpy<2.0.0
+pydantic<3.0.0
+streamlit==1.39.1
+dashscope==1.27.7

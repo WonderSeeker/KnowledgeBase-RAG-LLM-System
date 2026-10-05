@@ -1,0 +1,13 @@
+# 评测层专用依赖（阶段 2 新增）
+# 注意：不要安装到主 requirements.txt，也不要改动主文件的版本锁定。
+# 安装方式（在项目根目录，用项目的 .venv）：
+#   .\.venv\Scripts\python.exe -m pip install -r evaluation\requirements-eval.txt -c evaluation\constraints-eval.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+#
+# 为什么锁 ragas==0.1.21：
+#   项目锁了 langchain 0.1.20 / langchain-core 0.1.53 / pydantic 2.x，
+#   ragas 0.2+ 要求 langchain-core>=0.2，会连带升级主依赖、破坏现有环境。
+#   0.1.21 经 pip --dry-run 实测：只新增包，不动 langchain / pydantic / numpy。
+
+ragas==0.1.21
+# ragas 0.1.21 自带依赖 langchain-openai，但 r judge 走 OpenAI 兼容协议时版本敏感，显式锁死
+langchain-openai==0.1.7

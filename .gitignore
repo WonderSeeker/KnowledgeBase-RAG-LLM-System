@@ -14,10 +14,13 @@ data/
 .env
 .env.local
 
-# ---- 运行时产物：向量库 / 入库去重记录 / 评测缓存 ----
+# ---- 运行时产物：向量库 / 入库去重记录 / 评测中间产物 ----
+# 正式报告请放 evaluation/report_*.json（这些会纳入版本控制作为证据）
 chroma_db/
 md5.text
 evaluation/cache/
+evaluation/runs/
+evaluation/reports/
 
 # ---- 日志 ----
 *.log
