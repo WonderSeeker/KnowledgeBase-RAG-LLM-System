@@ -30,8 +30,10 @@ from pathlib import Path
 
 EVAL_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = EVAL_DIR.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+# 两个路径都要加：PROJECT_ROOT 用来 import config_data / rag，EVAL_DIR 用来 import dataset / offline
+for _path in (str(EVAL_DIR), str(PROJECT_ROOT)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 import config_data as config                                    # noqa: E402
 from dataset import EvalItem, load_eval_set, summarize          # noqa: E402
@@ -167,7 +169,6 @@ def score_with_ragas(records: list[dict], judge_provider: str, judge_model: str)
         llm=LangchainLLMWrapper(judge_llm),
         embeddings=judge_embeddings,
         raise_exceptions=False,        # 单条打分失败不要中断整轮评测
-        show_progress=True,
     )
 
     frame = result.to_pandas()
