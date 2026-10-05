@@ -2,6 +2,8 @@
 知识库
 """
 import os
+import io
+import time
 import  config_data as config
 import  hashlib
 from langchain_chroma import Chroma
@@ -43,6 +45,26 @@ def get_string_md5(input_str:str ,encoding='utf-8'):
     return md5_hex
 
 
+def extract_text(file_bytes: bytes, filename: str, encoding: str = "utf-8") -> str:
+    """从文件字节流中抽取纯文本
+
+    - .pdf：用 pypdf 逐页抽取文字（依赖 requirements.txt 里已有的 pypdf）
+    - 其它：按文本解码，先试 utf-8，失败再试 gbk（兼容中文 Windows 的 txt）
+
+    :param file_bytes: 文件原始字节
+    :param filename: 文件名（用于判断类型）
+    :param encoding: 文本文件的首选编码
+    """
+    if filename.lower().endswith(".pdf"):
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(file_bytes))
+        return "\n\n".join((page.extract_text() or "") for page in reader.pages)
+    try:
+        return file_bytes.decode(encoding)
+    except UnicodeDecodeError:
+        return file_bytes.decode("gbk", errors="ignore")
+
+
 class KnowledgeBaseService(object):
     def __init__(self):
         # 如果文件夹不存在则创建，如果存在则跳过
@@ -50,7 +72,9 @@ class KnowledgeBaseService(object):
 
         self.chroma=Chroma(          # 向量存储的示例 Chroma向量库对象
             collection_name=config.collection_name,      #数据库表名
-            embedding_function=DashScopeEmbeddings(model="text-embedding-v4"),
+            # 改造：原来这里硬编码 "text-embedding-v4"，与 rag.py 走 config 的写法不一致，
+            # 一旦改配置就会出现「入库用 A 模型、检索用 B 模型」导致检索失效
+            embedding_function=DashScopeEmbeddings(model=config.embedding_model_name),
             persist_directory=config.persist_directory,   #数据库本地存储文件夹
         )      # 向量存储的实例，Chroma向量库对象
         self.spliter=RecursiveCharacterTextSplitter(  # 文本分割器的对象
@@ -71,6 +95,10 @@ class KnowledgeBaseService(object):
         else:
             knowledge_chunks=[data]
 
+        # 基线观测：记录下来，方便核对分块参数的实际效果
+        print(f"[入库] 文件={filename} 原文长度={len(data)} 切分片段数={len(knowledge_chunks)} "
+              f"(chunk_size={config.chunk_size} chunk_overlap={config.chunk_overlap})")
+
         metadata={
             "source":filename,
             #2026-3-8 15:43:30
@@ -78,14 +106,17 @@ class KnowledgeBaseService(object):
             "operator":"客户",
         }
 
+        start_time=time.perf_counter()   # 基线观测：记录向量化 + 写库耗时
         self.chroma.add_texts(        # 内容加载到向量库中
             # iterable-> list \tuple
             knowledge_chunks,
             metadata=[metadata for _ in knowledge_chunks],
 
         )
+        cost=time.perf_counter()-start_time
         save_md5(md5_hex)
-        return "[Success]内容已经成功载入向量库"
+        print(f"[入库] 向量化+写库耗时 {cost:.2f}s")
+        return f"[Success]内容已经成功载入向量库（{len(knowledge_chunks)} 个片段，耗时 {cost:.2f}s）"
 
 if __name__ =='__main__':
     # r1 = get_string_md5("周杰伦")

@@ -7,7 +7,7 @@ import streamlit as st
 import time
 
 
-from knowledge_base import KnowledgeBaseService
+from knowledge_base import KnowledgeBaseService, extract_text
 
 
 # 添加网页标题
@@ -15,8 +15,8 @@ st.title("知识库更新服务")
 
 # file_uploader
 uploader_file=st.file_uploader(
-    "请上传TXT文件",
-    type=['txt'],
+    "请上传TXT / PDF文件",          # 改造：原项目仅支持 txt，这里补上 PDF（pypdf 解析）
+    type=['txt','pdf'],
     accept_multiple_files=False,   # False表示仅接受一个文件的上传
 )
 
@@ -31,8 +31,8 @@ if uploader_file is not None:
     st.subheader(f"文件名:{file_name}")
     st.write(f"格式:{file_type}  | 大小:{file_size:.2f}KB")
 
-    # get_value -> bytes -> decode("utf-8")
-    text=uploader_file.getvalue().decode("utf-8")
+    # get_value -> bytes -> 按文件类型抽取纯文本（txt 解码 / pdf 用 pypdf 抽页）
+    text=extract_text(uploader_file.getvalue(), file_name)
 
     with st.spinner("载入知识库中。。。"):     # 在 spinner内的代码执行过程中，会有一个转圈动画，优化用户体验
         time.sleep(1)
