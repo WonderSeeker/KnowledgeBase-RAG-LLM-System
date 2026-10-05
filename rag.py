@@ -1,3 +1,4 @@
+import time
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableWithMessageHistory, RunnableLambda
@@ -38,12 +39,49 @@ class RagService(object):
 
         self.chain = self.__get_chain()
 
+    def retrieve(self, question: str) -> list[Document]:
+        """单独执行一次检索，返回命中的文档片段
+
+        从链里把检索步骤抽出来，供脚本 / 评测 / 调试直接调用（阶段 2 的 RAGAS 需要拿到 contexts）
+        """
+        return self.vector_service.get_retriever().invoke(question)
+
+    def answer(self, question: str, session_id: str = "user_001") -> dict:
+        """一次性问答，返回答案 + 命中片段 + 分段耗时（供命令行与评测使用）
+
+        与 Streamlit 界面走的是同一套检索器和同一条链，保证指标可比
+        """
+        total_start = time.perf_counter()
+
+        retrieve_start = time.perf_counter()
+        contexts = self.retrieve(question)
+        retrieve_cost = time.perf_counter() - retrieve_start
+
+        generate_start = time.perf_counter()
+        text = self.chain.invoke(
+            {"input": question},
+            {"configurable": {"session_id": session_id}},
+        )
+        generate_cost = time.perf_counter() - generate_start
+
+        return {
+            "question": question,
+            "answer": text,
+            "contexts": [doc.page_content for doc in contexts],
+            "n_contexts": len(contexts),                     # 基线指标：检索命中片段数
+            "retrieve_seconds": round(retrieve_cost, 2),
+            "generate_seconds": round(generate_cost, 2),
+            "total_seconds": round(time.perf_counter() - total_start, 2),
+        }
+
     def __get_chain(self):
         """获取最终的执行链"""
 
         retriever = self.vector_service.get_retriever()
 
         def format_document(docs: list[Document]):
+            # 基线观测：每次检索实际命中的片段数（当前 = config.retrieve_k）
+            print(f"[检索] 命中片段数={len(docs)}，来源={[d.metadata.get('source') for d in docs]}")
             if not docs:
                 return "无相关参考资料"
 

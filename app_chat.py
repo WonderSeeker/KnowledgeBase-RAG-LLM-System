@@ -26,6 +26,7 @@ if prompt :
     st.session_state["message"].append({"role":"user","content":prompt})
 
     ai_res_list= []
+    start_time= time.perf_counter()      # 基线指标：记录端到端耗时
     with st.spinner("AI 思考中......."):
         # 调用 RAG服务
 
@@ -44,4 +45,9 @@ if prompt :
                 yield chunk
         st.chat_message("assistant").write_stream(capture(res_stream,ai_res_list))
         st.session_state["message"].append({"role": "assistant", "content": "".join(ai_res_list)})
+
+    # 基线观测：页面上直接显示耗时，同时打进日志（D:\Projects\_logs\rag.out）
+    cost= time.perf_counter() - start_time
+    st.caption(f"本次回答耗时 {cost:.2f}s")
+    print(f"[问答] 端到端耗时 {cost:.2f}s")
 
