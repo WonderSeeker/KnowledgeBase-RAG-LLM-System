@@ -86,13 +86,113 @@
 
 ---
 
-## 三、阶段 2/3/4
+## 三、阶段 2：接入 RAGAS 评测层
 
-（未开始，待阶段 1 验收后填写）
+### 3.1 依赖预研（本次改造最大的技术风险，已实测排除）
+
+项目的 `langchain-core` 锁在 0.1.53，而 **ragas 0.2+ 要求 `langchain-core>=0.2`**，
+一旦装上会连带升级 pydantic / numpy，项目当场跑不起来（numpy 必须 <2）。
+
+处理过程与结论：
+
+| 动作 | 结果 |
+|---|---|
+| `pip install --dry-run ragas==0.1.21` | 只新增包，**不动 langchain / pydantic / numpy** |
+| 实际安装（带约束文件） | 新增 ragas 0.1.21、datasets、openai、langchain-openai 等 13 个包 |
+| 装完核对版本 | langchain 0.1.20、core 0.1.53、community 0.0.38、chroma 0.1.4、chromadb 0.4.24、chroma-hnswlib 0.7.3、numpy 1.26.4、pydantic 2.13.5、streamlit 1.39.1 —— **全部与改造前一致** |
+| 唯一变化 | `fsspec` 2026.9.0 → 2026.6.0（datasets 要求；项目本身不用 fsspec） |
+| 4 个指标 API 导入 | `ragas 0.1.21` + `datasets 5.0.1` 下全部导入成功 |
+
+新增 `evaluation/constraints-eval.txt` 把主依赖钉死，防止以后再装评测依赖时被顺带升级。
+
+### 3.2 新增文件
+
+| 文件 | 作用 |
+|---|---|
+| `evaluation/dataset.py` | 评测集构建：29 条内置样本 + JSONL 读写（`--init` 可重新生成） |
+| `evaluation/eval_set.jsonl` | **权威评测集**，一行一条，可直接手工增删，git diff 友好 |
+| `evaluation/offline.py` | 离线替身：本地切分 + 字面检索 + 启发式代理指标，**不需要 API Key** |
+| `evaluation/run_ragas.py` | 跑评测主入口：RAG 链路产出答案/片段 → RAGAS 打分 → 落 JSON |
+| `evaluation/report.py` | 出报告：单份指标表 / 两份「改造前 vs 改造后」对比表（Markdown） |
+| `evaluation/requirements-eval.txt` | 评测层依赖（不改动主 requirements.txt） |
+| `evaluation/constraints-eval.txt` | 主依赖版本约束，防误升级 |
+
+### 3.3 评测集构成（29 条，全部出自 `assets/` 语料）
+
+- 按语料：`尺码推荐.txt` 5 条、`洗涤养护.txt` 15 条、`颜色推荐.txt` 9 条
+- 按类型：单点事实 12 条、精确数值 8 条、跨段落归纳 7 条、否定性提问 2 条
+
+按类型分布是刻意设计的：**「跨段落归纳」和「精确数值」最容易因 `top_k` 过小而漏检**，
+阶段 3 的优化效果会主要从这两类里体现出来。
+
+### 3.4 一条命令跑出报告
+
+```powershell
+cd D:\Projects\KnowledgeBase-RAG-LLM-System
+
+# 真实 RAGAS 评测（需要 .env 里的 DASHSCOPE_API_KEY）
+.\.venv\Scripts\python.exe evaluation\run_ragas.py --mode real --name baseline
+
+# 离线自检（不需要 Key，验证流程可跑通，不烧 token）
+.\.venv\Scripts\python.exe evaluation\run_ragas.py --mode mock
+
+# 出报告 / 出对比表
+.\.venv\Scripts\python.exe evaluation\report.py evaluation\report_baseline.json
+.\.venv\Scripts\python.exe evaluation\report.py evaluation\report_baseline.json evaluation\report_optimized.json --out evaluation\REPORT.md
+
+# 只重新打分，不重跑模型（换指标/换裁判时省钱）
+.\.venv\Scripts\python.exe evaluation\run_ragas.py --reuse evaluation\runs\baseline_real.jsonl
+```
+
+裁判模型设计（`--judge-provider`）：
+
+- `dashscope`（默认）：走 DashScope 的 **OpenAI 兼容端点** `https://dashscope.aliyuncs.com/compatible-mode/v1`，
+  这是 RAGAS 最稳的接法；裁判模型默认 `qwen-plus`（打分模型要快，别用 `qwen3-max`）
+- `dashscope-native`：`LangchainLLMWrapper(ChatTongyi(...))`
+- `ollama`：本地 `http://127.0.0.1:11434/v1`，阶段 4 做「零成本」对比时用
+
+### 3.5 已实测的数据（⚠️ 离线启发式，**不是**真实效果）
+
+用同一套评测集，只改 `top_k`（1 → 4），验证「检索一变、指标就跟着变」这条因果链是通的：
+
+| 指标 | top_k=1 | top_k=4 | Δ | 变化 |
+|---|---|---|---|---|
+| faithfulness（忠实度） | 1.0000 | 1.0000 | +0.0000 | +0.0% |
+| answer_relevancy（答案相关性） | 0.2146 | 0.2146 | +0.0000 | +0.0% |
+| context_recall（上下文召回） | 0.6972 | **0.7547** | **+0.0575** | **+8.2%** |
+| context_precision（上下文精度） | 0.6972 | 0.3256 | -0.3716 | -53.3% |
+| 平均检索片段数 | 1.0 | 4.0 | - | - |
+
+说明：faithfulness 恒为 1.0 是因为离线替身把片段原样当答案（不会幻觉），
+真实模型下这个数会降下来；`context_precision` 随 k 增大而下降，符合"召回了但噪声变多"的直觉。
+**这些数字只能证明流水线正确，不能当作改造效果。**
+
+### 3.6 阶段 2 验收状态
+
+- [x] 一条命令跑出评测报告，报告含 4 个指标（`report_baseline.json` 结构已就绪）
+- [x] 评测集 29 条（20~30 条要求达成）
+- [x] 4 个指标全部接入 RAGAS（`faithfulness` / `answer_relevancy` / `context_recall` / `context_precision`）
+- [x] 对比表功能已就绪（阶段 3 直接复用）
+- [ ] **真实 RAGAS 分数** —— 阻塞在 `DASHSCOPE_API_KEY`，填入 `.env` 后执行 3.4 的第一条命令即可产出
+
+### 3.7 踩到的坑（记录备查）
+
+1. **Windows 控制台是 GBK**：脚本里用 `print("⚠️ ...")` 直接抛 `UnicodeEncodeError`。
+   已全部改为纯文本 `[警告]`。文件本身仍用 `encoding="utf-8"` 写入，不受影响。
+2. **PowerShell 显示 UTF-8 中文会乱码**：`Get-Content eval_set.jsonl` 看到的是乱码，
+   但用 Python 以 utf-8 读取完全正常——是 PS 5.1 的显示编码问题，文件本身没问题。
+3. `pip` 装含中文注释的 `requirements.txt` 会 `UnicodeDecodeError: 'gbk'`，
+   需先 `$env:PYTHONUTF8='1'`（本次安装已用到）。
 
 ---
 
-## 四、禁止事项（改造红线，勿破）
+## 四、阶段 3/4
+
+（未开始）
+
+---
+
+## 五、禁止事项（改造红线，勿破）
 
 1. 不重建 `.venv`，不换成 Python 3.12（`chroma-hnswlib==0.7.3` 在 3.12 上只能现场编译 C++，会失败）。
 2. 不改 `requirements.txt` 的版本锁定。
