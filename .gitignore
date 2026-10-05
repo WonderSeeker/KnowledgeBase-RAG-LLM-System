@@ -10,6 +10,18 @@ vector_db/
 chat_history/
 data/
 
+# ---- 环境变量（内含 DASHSCOPE_API_KEY，严禁提交）----
+.env
+.env.local
+
+# ---- 运行时产物：向量库 / 入库去重记录 / 评测缓存 ----
+chroma_db/
+md5.text
+evaluation/cache/
+
+# ---- 日志 ----
+*.log
+
 .idea/
 .vscode/
 .DS_Store

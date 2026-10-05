@@ -16,7 +16,7 @@ class VectorStoreService(object):
 
     def get_retriever(self):
             """返回向量检索器，方便加入chain"""
-            return self.vector_store.as_retriever(search_kwargs={"k": config.similarity_threshold})
+            return self.vector_store.as_retriever(search_kwargs={"k": config.retrieve_k})
 
 if __name__ =='__main__':
         from langchain_community.embeddings import DashScopeEmbeddings
