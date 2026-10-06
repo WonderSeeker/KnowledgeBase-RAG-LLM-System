@@ -186,13 +186,115 @@ cd D:\Projects\KnowledgeBase-RAG-LLM-System
 
 ---
 
-## 四、阶段 3/4
+## 四、阶段 3：检索优化 + A/B 对比
+
+### 4.1 新增内容
+
+| 新增 | 作用 |
+|---|---|
+| `retrievers.py` | 检索策略层：向量 / BM25 / RRF 混合 / DashScope 重排，统一 `invoke()` 契约 |
+| `requirements-optim.txt` | `rank-bm25==0.2.2` + `jieba==0.42.1`（实测只新增 2 个包，主依赖零变动） |
+| `evaluation/experiments.py` | 对比实验驱动：入库 → 评测 → 汇总成一张横向表，一条命令 |
+| `scripts/ingest.py`（升级） | 支持 `--chunk-size/--chunk-overlap/--collection/--rebuild/--dry-run` |
+| `evaluation/run_ragas.py`（升级） | 新增 `--retriever/--candidate-k/--rerank/--collection/--chunk-size/--chunk-overlap` |
+
+`config_data.py` 新增参数：
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `retrieval_method` | `vector` | `vector` / `bm25` / `hybrid` |
+| `candidate_k` | 10 | 粗排候选数（混合与重排都从这里精选） |
+| `rrf_k` | 60 | RRF 融合常数 |
+| `rerank_enabled` | `False` | 是否开启重排 |
+| `rerank_model` | `gte-rerank-v2` | DashScope 重排模型 |
+
+### 4.2 三个关键技术选择及理由
+
+1. **混合检索用 RRF 而不是加权求和**
+   BM25 分值与余弦相似度量纲完全不同，直接加权要调参且不稳定；RRF 只看排名不看分值，天然免调参。
+2. **BM25 语料直接从 Chroma 集合读**
+   保证两路检索面对的是**同一份语料、同一套分块**，避免"两路各用一套索引"这种隐蔽 bug。
+3. **重排失败必须降级而不是崩**
+   重排依赖外部 API，网络/额度任何一环抖动都不该让问答挂掉。当前实现失败时退回粗排顺序并打警告，
+   无 Key 时同样降级（已实测）。
+
+### 4.3 三种检索策略实测（⚠️ 离线启发式，不是 RAGAS）
+
+同一套 29 条评测集，只改检索策略：
+
+| 指标 | vector（top_k=1） | bm25（top_k=4） | hybrid（top_k=4，候选 6） |
+|---|---|---|---|
+| faithfulness | 0.9655 | 0.9310 | 0.9655 |
+| answer_relevancy | 0.2146 | 0.2105 | 0.2146 |
+| **context_recall** | 0.6972 | 0.7159 | **0.7481** |
+| context_precision | 0.6972 | 0.4793 | 0.4313 |
+| 平均检索片段数 | 0.97 | — | 3.0 |
+
+混合检索的召回高于任一路单独使用，符合 RRF 的设计预期。
+
+### 4.4 分块参数对比实验（⚠️ 离线启发式，不是 RAGAS）
+
+`evaluation/experiments.py --mode mock --configs 300/30,600/60,1000/100 --retriever hybrid --top-k 4 --candidate-k 12`
+
+| 指标 | 300/30 | 600/60 | 1000/100 |
+|---|---|---|---|
+| 语料片段总数 | 15 | 8 | 6 |
+| context_recall | 0.7210 | 0.7439 | **0.7481** |
+| context_precision | 0.3296 | 0.3774 | **0.4313** |
+| answer_relevancy | **0.2875** | 0.2501 | 0.2146 |
+
+分块越小 → 片段越聚焦、答案相关性越高，但召回略降；分块越大 → 召回略升，但噪声更多。
+这是一条真实的权衡曲线，不是"某组参数一定最好"，需要按业务取舍。
+
+### 4.5 这一步挖出来的 4 个真问题
+
+1. **`max_spliter_char_number = 1000` 让"调小 chunk_size"对短文档完全无效**
+   `尺码推荐.txt` 只有 270 字，无论 `chunk_size` 设 300 还是 1500，永远是 1 个片段（`--dry-run` 实测）。
+   也就是说这份最需要精确检索的尺码表，永远无法被拆开检索。
+   → 阶段 4 建议把这套"先判长度再切分"的逻辑收敛成单纯的 splitter。
+2. **语义改写类问题是字面检索的死角**
+   `color-06「怎样穿显得更瘦？」` 在离线替身下 **0 命中**——语料里写的是"显瘦搭配"，
+   字面/BM25 都匹配不上，只有真向量检索能救。这条样本正好是验证向量检索价值的标杆。
+3. **基线的 `top_k=1` 有 3% 的问题直接 0 命中**（平均片段数 0.97），等于大模型收到"无相关参考资料"。
+4. **Chroma 匿名遥测在 stderr 刷错误日志**（新版 posthog 与 chromadb 0.4.x 不兼容），
+   已通过 `Settings(anonymized_telemetry=False)` 关闭。
+
+### 4.6 命令
+
+```powershell
+cd D:\Projects\KnowledgeBase-RAG-LLM-System
+
+# 不联网看清分块效果（不需要 Key）
+.\.venv\Scripts\python.exe scripts\ingest.py --dry-run --chunk-size 300 --chunk-overlap 30
+
+# 离线跑通实验流程（分块真实生效，检索与打分用离线替身）
+.\.venv\Scripts\python.exe evaluation\experiments.py --mode mock --configs 300/30,600/60,1000/100 --retriever hybrid --top-k 4
+
+# 真实实验（需要 Key）：每组分块参数入独立集合，再用 RAGAS 打分
+.\.venv\Scripts\python.exe evaluation\experiments.py --mode real --name chunk --configs 500/50,1000/100,1500/200 --retriever hybrid --top-k 4 --candidate-k 10 --rerank
+
+# 基线 vs 优化 的真实对比表
+.\.venv\Scripts\python.exe evaluation\report.py evaluation\report_baseline.json evaluation\report_optimized.json --out evaluation\REPORT.md
+```
+
+### 4.7 阶段 3 验收状态
+
+- [x] BM25 + 向量混合检索（RRF 融合）
+- [x] Rerank 接入（DashScope `gte-rerank-v2`），失败降级已实测
+- [x] 分块大小/重叠度对比实验流程（`--dry-run` 试算 + 多组评测 + 横向表）
+- [x] 「改造前 vs 改造后」对比表能力（`report.py` 支持 1/N 份报告）
+- [ ] **真实 `report_optimized.json` 与真实对比表** —— 阻塞在 `DASHSCOPE_API_KEY`
+- [ ] 重排的真实收益数字 —— 需要 Key 才能测
+
+---
+
+## 五、阶段 4
 
 （未开始）
 
 ---
 
-## 五、禁止事项（改造红线，勿破）
+## 六、禁止事项（改造红线，勿破）
 
 1. 不重建 `.venv`，不换成 Python 3.12（`chroma-hnswlib==0.7.3` 在 3.12 上只能现场编译 C++，会失败）。
 2. 不改 `requirements.txt` 的版本锁定。
