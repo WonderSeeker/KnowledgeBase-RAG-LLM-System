@@ -72,6 +72,13 @@ def render(reports: list[dict], labels: list[str], worst: int = 0) -> str:
         # 只用纯文本标记：Windows 控制台是 GBK，emoji 会让 print 抛 UnicodeEncodeError
         lines += ["", f"> **[警告]** {warnings[0]}"]
 
+    # 口径校验：k 不同就没有可比性，必须显式警告（context_precision 随 k 增大天然下降）
+    top_ks = sorted({(r.get("meta", {}) or {}).get("retrieval", {}).get("top_k") for r in reports} - {None})
+    if len(top_ks) > 1:
+        lines += ["", f"> **[警告] 口径不一致**：各报告的 top_k 不同（{top_ks}）。"
+                      f"检索片段数不同，context_precision / context_recall 不具直接可比性，"
+                      f"请先把 k 对齐再下结论。"]
+
     # ---- 指标表（支持 1 份 / 2 份 / N 份：N 份时以第一份为基准算 Δ）----
     lines += ["", "## 指标对比", ""]
     header = "| 指标 | " + " | ".join(labels) + " |"
@@ -143,6 +150,11 @@ def main() -> int:
         print(f"[警告] 两份报告的 模式/裁判 不一致（mode={modes}, judge={judges}），对比结论无效，请先统一口径。\n")
     if "mock" in modes or "heuristic" in judges:
         print("[警告] 含 MOCK/启发式数据：打分不是 RAGAS，只用于验证流程，不能当作真实效果。\n")
+
+    top_ks = sorted({(r.get("meta", {}) or {}).get("retrieval", {}).get("top_k") for r in reports} - {None})
+    if len(top_ks) > 1:
+        print(f"[警告] 口径不一致：各报告 top_k = {top_ks}。"
+              f"检索片段数不同时 context_precision 不可横向比较，请先对齐 k。\n")
 
     text = render(reports, labels, worst=args.worst)
     print(text)
