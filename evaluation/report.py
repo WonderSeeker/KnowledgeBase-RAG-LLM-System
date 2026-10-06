@@ -26,6 +26,31 @@ METRIC_CN = {
     "context_precision": "上下文精度（噪声多少）",
 }
 
+# ★ 同名指标在两种口径下算法完全不同，必须逐条写清楚，否则只看表头必然误读
+CALIBER = {
+    "heuristic": {
+        "title": "离线启发式代理指标（**不是 RAGAS**）",
+        "algo": {
+            "faithfulness": "答案的字符二元组有多少比例出现在检索片段里（防幻觉，纯字符串重叠）",
+            "answer_relevancy": "问题的字符二元组有多少比例被答案覆盖（纯字符串重叠）",
+            "context_recall": "标准答案的字符二元组有多少比例被检索片段覆盖（纯字符串重叠）",
+            "context_precision": "各检索片段与标准答案的覆盖率取平均（纯字符串重叠）",
+        },
+        "note": "全部为字符二元组重叠率，**不调用任何模型**，与 RAGAS 官方算法无关；"
+                "检索侧在 mock 模式下也是离线替身，因此本表只能证明流程可跑通，**不可作为效果结论**。",
+    },
+    "ragas": {
+        "title": "RAGAS 官方实现",
+        "algo": {
+            "faithfulness": "把答案拆成若干陈述，逐条用裁判 LLM 判断能否由检索片段推出，取成立比例",
+            "answer_relevancy": "用裁判 LLM 由答案反推可能的问题，与真实问题做向量余弦相似度",
+            "context_recall": "用裁判 LLM 从标准答案提取陈述，逐条判断是否被检索片段支持，取比例",
+            "context_precision": "逐条判断检索片段与问题的相关性，按排名加权（平均精度）",
+        },
+        "note": "需要裁判模型（见各报告的 judge_model）与 embedding 接口；分数受裁判模型影响，需固定裁判模型再比较。",
+    },
+}
+
 
 def load_report(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
@@ -95,6 +120,29 @@ def render(reports: list[dict], labels: list[str], worst: int = 0) -> str:
             row += f" {diff} | {pct} |"
         lines.append(row)
     lines.append("")
+
+    # ---- 指标口径说明（逐条写清 mock 与 real 下的真实算法）----
+    lines += ["## 指标口径说明", ""]
+    by_judge: dict[str, list[str]] = {}
+    for label, report in zip(labels, reports):
+        judge = (report.get("meta", {}) or {}).get("judge") or "heuristic"
+        by_judge.setdefault(judge, []).append(label)
+    for judge, group in by_judge.items():
+        caliber = CALIBER.get(judge, CALIBER["heuristic"])
+        suffix = ""
+        if judge == "ragas":
+            models = {(r.get("meta", {}) or {}).get("judge_model") for r in reports
+                      if (r.get("meta", {}) or {}).get("judge") == "ragas"}
+            suffix = f"（裁判模型：{'、'.join(sorted(m for m in models if m))}）"
+        lines += [f"**{'、'.join(group)} —— 口径：{caliber['title']}**{suffix}", "",
+                  "| 指标 | 本口径下的实际算法 |", "|---|---|"]
+        for name in METRIC_NAMES:
+            lines.append(f"| {name} | {caliber['algo'][name]} |")
+        lines += ["", f"> {caliber['note']}", ""]
+
+    if len(by_judge) > 1:
+        lines += ["> **[警告]** 同一张表里混了两种口径（" + "、".join(sorted(by_judge)) + "），"
+                  "同名指标的算法不同，**行内数值不可互相比较**。", ""]
 
     # ---- 运行开销 ----
     lines += ["## 运行开销", ""]
