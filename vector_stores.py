@@ -9,16 +9,11 @@ CHROMA_SETTINGS = Settings(anonymized_telemetry=False)
 
 
 def _silence_chroma_telemetry_noise() -> None:
-    """消掉 chromadb 0.4.24 的遥测报错噪声（不是我们触发的异常）
-
-    根因：chromadb 0.4.24 的 posthog 适配层用的是老 API
-        posthog.capture(user_id, event_name, properties)      # 3 个位置参数
-    而新版 posthog 的 capture 只接受 1 个位置参数，于是每次上报都在签名校验阶段抛
-        TypeError: capture() takes 1 positional argument but 3 were given
-    并被 logger.error 打出来。注意 Settings(anonymized_telemetry=False) 只能阻止"真正发送"
-    （它只是把 posthog.disabled 置 True），挡不住这行日志——异常发生在真正发送之前。
-    所以这里直接把该 logger 提到 CRITICAL：既不发送，也不再刷日志。
-    """
+    """消掉 chromadb 0.4.24 的遥测报错噪声（不是我们触发的异常）"""
+    # 故意把该 logger 提到 CRITICAL：chromadb 0.4.24 的 posthog 适配层
+    # 用 3 个位置参数调 posthog.capture，新版 posthog 只接受 1 个，
+    # 异常发生在签名校验阶段，anonymized_telemetry=False 挡不住这行 logger.error。
+    # ★ 不要"修好"它——我们完全不需要遥测。
     logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.CRITICAL)
 
 
