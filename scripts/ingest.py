@@ -61,17 +61,13 @@ def dry_run(files: list[Path], chunk_size: int, chunk_overlap: int) -> int:
     splitter = build_splitter(chunk_size, chunk_overlap)
     total_chunks = 0
     print(f"[试算] chunk_size={chunk_size} chunk_overlap={chunk_overlap}"
-          f"（切分阈值 max_spliter_char_number={config.max_spliter_char_number}）")
+          f"（判定已统一交给 splitter；原文短于 chunk_size 时自然只有 1 个片段）")
     for file_path in files:
         text = extract_text(file_path.read_bytes(), file_path.name)
-        if len(text) > config.max_spliter_char_number:
-            pieces = splitter.split_text(text)
-            note = ""
-        else:
-            pieces = [text]
-            note = "  ← 未超过阈值，整篇 1 个片段（不切分）"
+        pieces = splitter.split_text(text)
         lengths = [len(piece) for piece in pieces]
         total_chunks += len(pieces)
+        note = "  ← 原文短于 chunk_size" if len(pieces) == 1 and lengths[0] <= chunk_size else ""
         print(f"  {file_path.name}: 原文 {len(text)} 字 → {len(pieces)} 片段，"
               f"片段长度 min/avg/max = {min(lengths)}/{sum(lengths)//len(lengths)}/{max(lengths)}{note}")
     print(f"[试算] 合计 {total_chunks} 个片段（这是检索的最小单位，也是 BM25 的语料规模）")

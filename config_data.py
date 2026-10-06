@@ -26,7 +26,10 @@ chunk_size= 1000
 chunk_overlap= 100
 separators =["\n\n","\n",".","!","?","。","！","？"," ",""]
 
-max_spliter_char_number= 1000  # 文本分割阈值
+# 【已弃用】原「文本分割硬上限」：≤ 该值的文档一律不切分。
+# 这个门槛曾导致 chunk_size 对短文档完全失效（详见 CHANGES.md 4.8），已改为一律交给 splitter。
+# 仅保留配置项以兼容旧代码，不再参与任何判定。
+max_spliter_char_number= 1000
 
 # 检索返回的片段数量（k）
 retrieve_k = 1     # 基线值 1：只把 1 个片段喂给大模型，是 context_recall 的天花板

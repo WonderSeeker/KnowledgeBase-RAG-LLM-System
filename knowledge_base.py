@@ -102,10 +102,13 @@ class KnowledgeBaseService(object):
         md5_hex=get_string_md5(data)
         if check_md5(md5_hex):
             return "[Repeat] 内容已存在知识库"
-        if len(data) > config.max_spliter_char_number:
-            knowledge_chunks:list[str]=self.spliter.split_text(data) # 类型统一，均用列表套字符串
-        else:
-            knowledge_chunks=[data]
+        # 缺陷修复（阶段 3 补充）：原来用 max_spliter_char_number(=1000) 做硬门槛，
+        #   if len(data) > 1000: 切分 else: [data]
+        # 导致 ≤1000 字的文档「永远不切分」，《尺码推荐.txt》(270 字) 无论 chunk_size
+        # 设 300 还是 1500 都只有 1 个片段 —— 分块参数对短文档完全失效。
+        # 现在一律交给 splitter：文本短于 chunk_size 时它自然返回 1 个片段，
+        # 文本更长时按 chunk_size/chunk_overlap 切分。判定语义单一，chunk_size 真实生效。
+        knowledge_chunks:list[str]=self.spliter.split_text(data)
 
         # 基线观测：记录下来，方便核对分块参数的实际效果
         print(f"[入库] 文件={filename} 原文长度={len(data)} 切分片段数={len(knowledge_chunks)} "

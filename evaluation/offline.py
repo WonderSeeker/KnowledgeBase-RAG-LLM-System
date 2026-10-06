@@ -59,10 +59,7 @@ def load_local_documents() -> list[Document]:
     documents: list[Document] = []
     for path in sorted(ASSETS_DIR.glob("*.txt")):
         text = extract_text(path.read_bytes(), path.name)
-        if len(text) > config.max_spliter_char_number:
-            pieces = splitter.split_text(text)
-        else:
-            pieces = [text]                    # 与 upload_by_str 的判定逻辑保持一致
+        pieces = splitter.split_text(text)      # 与 upload_by_str 的判定逻辑保持一致（一律交给 splitter）
         for index, piece in enumerate(pieces):
             documents.append(Document(page_content=piece, metadata={"source": path.name, "index": index}))
     return documents
