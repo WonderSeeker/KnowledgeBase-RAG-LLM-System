@@ -238,7 +238,7 @@ cd D:\Projects\KnowledgeBase-RAG-LLM-System
 
 | 指标 | 300/30 | 600/60 | 1000/100 |
 |---|---|---|---|
-| 语料片段总数 | 15 | 8 | 6 |
+| 语料片段总数（`--dry-run` 实测） | 15 | 9 | 6 |
 | context_recall | 0.7210 | 0.7439 | **0.7481** |
 | context_precision | 0.3296 | 0.3774 | **0.4313** |
 | answer_relevancy | **0.2875** | 0.2501 | 0.2146 |
