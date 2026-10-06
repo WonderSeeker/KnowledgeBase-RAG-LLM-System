@@ -62,22 +62,52 @@ def write_json(path: Path, data: dict) -> None:
 
 
 # --------------------------------------------------------------------------- 第一步：跑 RAG 链路
-def run_pipeline(items: list[EvalItem], mode: str, top_k: int) -> list[dict]:
+def build_offline_retriever(candidate_k: int):
+    """离线模式的检索器：向量腿换成"本地字面检索替身"，其余（BM25/RRF/截断）都是真实代码
+
+    这样离线跑通才真的有意义——验证的是阶段 3 的检索逻辑本身，而不是另写一套假流程。
+    """
+    from offline import LocalLexicalRetriever, load_local_documents
+    from retrievers import build_retriever
+
+    documents = load_local_documents()
+    method = config.retrieval_method
+    vector_leg = None
+    if method in ("vector", "hybrid"):
+        # 与真实路径保持同样的粗排口径：向量腿按 candidate_k 出候选，再由 HybridRetriever 截断到 k
+        vector_leg = LocalLexicalRetriever(documents, k=candidate_k)
+    print(f"[离线模式] 本地切分 {len(documents)} 个片段；向量腿=字面检索替身，策略={method}（不联网）")
+    return build_retriever(
+        method,
+        vector_leg=vector_leg,
+        documents=documents,
+        k=config.retrieve_k,
+        candidate_k=candidate_k,
+        rrf_k=config.rrf_k,
+        reranker=None,                      # 重排要联网，离线模式不使用
+    )
+
+
+def run_pipeline(items: list[EvalItem], mode: str, top_k: int, candidate_k: int) -> list[dict]:
     """对每条问题跑一次 RAG，收集 answer / contexts / 耗时
 
     返回的 records 会先存成 jsonl，之后重新打分可以直接 --reuse，不必再跑模型。
     """
-    config.retrieve_k = top_k          # 必须在建 RagService 之前覆盖，检索器是在 __init__ 里建的
+    # 必须在建检索器之前覆盖：检索器是在 RagService.__init__ / build_offline_retriever 里建的
+    config.retrieve_k = top_k
+    config.candidate_k = candidate_k
 
     if mode == "mock":
-        from offline import lexical_retrieve, load_local_chunks, mock_answer
-        chunks = load_local_chunks()
-        print(f"[离线模式] 本地切分出 {len(chunks)} 个片段，用字面检索代替向量检索（不联网）")
+        if config.rerank_enabled:
+            print("[离线模式] 重排需要联网调用 DashScope，本轮自动关闭")
+            config.rerank_enabled = False
+        from offline import mock_answer
+        retriever = build_offline_retriever(candidate_k)
         records = []
         for item in items:
             start = time.perf_counter()
-            hits = lexical_retrieve(item.question, chunks, top_k)
-            contexts = [hit["content"] for hit in hits]
+            hits = retriever.invoke(item.question)
+            contexts = [doc.page_content for doc in hits]
             answer = mock_answer(item.question, contexts)
             records.append({
                 "id": item.id,
@@ -232,6 +262,14 @@ def main() -> int:
     parser.add_argument("--out", default=None, help="报告输出路径，默认 evaluation/report_<name>.json")
     parser.add_argument("--eval-set", default=str(EVAL_DIR / "eval_set.jsonl"), help="评测集路径")
     parser.add_argument("--top-k", type=int, default=None, help="覆盖 config.retrieve_k（阶段 3 做 A/B 用）")
+    parser.add_argument("--retriever", choices=["vector", "bm25", "hybrid"], default=None,
+                        help="检索策略：vector 纯向量 / bm25 纯关键词 / hybrid 混合（默认取 config）")
+    parser.add_argument("--candidate-k", type=int, default=None,
+                        help="粗排候选数（混合检索与重排从这批候选里精选）")
+    parser.add_argument("--rerank", dest="rerank", action="store_true", default=None,
+                        help="开启 DashScope 重排（gte-rerank-v2）")
+    parser.add_argument("--no-rerank", dest="rerank", action="store_false",
+                        help="关闭重排（默认）")
     parser.add_argument("--judge", choices=["ragas", "heuristic"], default=None,
                         help="裁判：ragas=真 RAGAS；heuristic=离线代理指标。real 模式默认 ragas")
     parser.add_argument("--judge-provider", default="dashscope",
@@ -242,7 +280,13 @@ def main() -> int:
     args = parser.parse_args()
 
     judge = args.judge or ("heuristic" if args.mode == "mock" else "ragas")
+    # 阶段 3：把命令行开关写回 config，检索器是在后面才构造的，所以这里覆盖有效
+    if args.retriever:
+        config.retrieval_method = args.retriever
+    if args.rerank is not None:
+        config.rerank_enabled = args.rerank
     top_k = args.top_k if args.top_k is not None else config.retrieve_k
+    candidate_k = args.candidate_k if args.candidate_k is not None else config.candidate_k
     if args.out:
         out_path = Path(args.out)
     elif args.mode == "mock":
@@ -252,7 +296,9 @@ def main() -> int:
 
     started = time.perf_counter()
     print("=" * 78)
-    print(f"[评测] 实验名={args.name} 模式={args.mode} 裁判={judge} 检索 top_k={top_k}")
+    print(f"[评测] 实验名={args.name} 模式={args.mode} 裁判={judge}")
+    print(f"[评测] 检索：策略={config.retrieval_method} top_k={top_k} 候选={candidate_k} "
+          f"重排={'开' if config.rerank_enabled else '关'}")
     print("=" * 78)
 
     # 1) 拿答案与检索片段
@@ -266,7 +312,7 @@ def main() -> int:
             items = items[:args.limit]
         print(summarize(items))
         print("-" * 78)
-        records = run_pipeline(items, args.mode, top_k)
+        records = run_pipeline(items, args.mode, top_k, candidate_k)
         run_path = RUNS_DIR / f"{args.name}_{args.mode}.jsonl"
         save_records(run_path, records)
         print(f"[评测] 运行明细已保存：{run_path}")
@@ -296,11 +342,17 @@ def main() -> int:
             "eval_set": str(Path(args.eval_set)),
             "eval_size": len(records),
             "retrieval": {
-                "method": "本地字面检索（离线替身）" if args.mode == "mock" else "向量检索（Chroma）",
+                "method": config.retrieval_method,
+                "offline_stand_in": args.mode == "mock",
                 "top_k": top_k,
+                "candidate_k": candidate_k,
+                "rrf_k": config.rrf_k if config.retrieval_method == "hybrid" else None,
+                "rerank": config.rerank_enabled,
+                "rerank_model": config.rerank_model if config.rerank_enabled else None,
                 "chunk_size": config.chunk_size,
                 "chunk_overlap": config.chunk_overlap,
                 "max_spliter_char_number": config.max_spliter_char_number,
+                "collection": config.collection_name,
             },
             "models": {
                 "embedding": config.embedding_model_name,

@@ -2,8 +2,8 @@
 
 存在的意义：
     1. 没有 DASHSCOPE_API_KEY 时验证评测代码与报告格式是否正确（不烧 token、不联网）；
-    2. 提供一个可复现的对照物：它用纯本地的字词重叠做检索和打分，
-       所以能证明「检索参数一变，指标就跟着变」这条因果链是通的。
+    2. 提供一个可复现的对照物：检索和打分全在本地，所以能证明
+       「检索参数一变，指标就跟着变」这条因果链是通的。
 
 ⚠️ 郑重说明：本模块的打分**不是 RAGAS**，而是「字符二元组重叠」的启发式代理指标。
    真实指标必须用 run_ragas.py 的 --mode real（需要 API Key）。
@@ -19,9 +19,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import config_data as config                                    # noqa: E402
-from knowledge_base import extract_text                         # noqa: E402
-from langchain_text_splitters import RecursiveCharacterTextSplitter  # noqa: E402
+import config_data as config                                          # noqa: E402
+from knowledge_base import extract_text                               # noqa: E402
+from langchain_core.documents import Document                         # noqa: E402
+from langchain_text_splitters import RecursiveCharacterTextSplitter   # noqa: E402
 
 ASSETS_DIR = PROJECT_ROOT / "assets"
 
@@ -46,8 +47,8 @@ def coverage(part: str, whole: str) -> float:
     return len(part_grams & char_bigrams(whole)) / len(part_grams)
 
 
-# --------------------------------------------------------------------------- 本地切分与检索
-def load_local_chunks() -> list[dict]:
+# --------------------------------------------------------------------------- 本地语料与检索
+def load_local_documents() -> list[Document]:
     """用与知识库完全相同的分块参数，在本地把 assets 语料切好（不联网、不调 embedding）"""
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=config.chunk_size,
@@ -55,29 +56,41 @@ def load_local_chunks() -> list[dict]:
         separators=config.separators,
         length_function=len,
     )
-    chunks: list[dict] = []
+    documents: list[Document] = []
     for path in sorted(ASSETS_DIR.glob("*.txt")):
         text = extract_text(path.read_bytes(), path.name)
         if len(text) > config.max_spliter_char_number:
             pieces = splitter.split_text(text)
         else:
             pieces = [text]                    # 与 upload_by_str 的判定逻辑保持一致
-        for i, piece in enumerate(pieces):
-            chunks.append({"source": path.name, "index": i, "content": piece})
-    return chunks
+        for index, piece in enumerate(pieces):
+            documents.append(Document(page_content=piece, metadata={"source": path.name, "index": index}))
+    return documents
 
 
-def lexical_retrieve(question: str, chunks: list[dict], k: int) -> list[dict]:
-    """纯本地字面检索：按 bigram 重叠度排序取 top-k
+class LocalLexicalRetriever:
+    """本地字面检索器：扮演"向量检索腿"的离线替身
 
-    刻意保持简单，它的角色是"离线替身"，不是要打败向量检索。
+    它和 BM25Retriever 的接口完全一致（invoke -> list[Document]），
+    这样离线模式就能复用**真实的** RRF 融合、重排适配等阶段 3 代码，
+    而不是另写一套假流程——假流程跑通没有意义。
     """
-    scored = []
-    for chunk in chunks:
-        score = coverage(question, chunk["content"])
-        scored.append((score, chunk))
-    scored.sort(key=lambda pair: pair[0], reverse=True)
-    return [chunk for _, chunk in scored[:k]]
+
+    name = "local-lexical"
+
+    def __init__(self, documents: list[Document], k: int):
+        self.documents = list(documents)
+        self.k = k
+
+    def invoke(self, question: str) -> list[Document]:
+        scored = [(coverage(question, doc.page_content), doc) for doc in self.documents]
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [
+            Document(page_content=doc.page_content,
+                     metadata={**doc.metadata, "lexical_score": round(score, 4)})
+            for score, doc in scored[: self.k]
+            if score > 0
+        ]
 
 
 def mock_answer(question: str, contexts: list[str]) -> str:

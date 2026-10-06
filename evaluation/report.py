@@ -48,9 +48,17 @@ def delta_text(before, after) -> tuple[str, str]:
 def describe(report: dict) -> str:
     meta = report.get("meta", {})
     retrieval = meta.get("retrieval", {})
-    return (f"{meta.get('name')} | 模式={meta.get('mode')} 裁判={meta.get('judge')}"
-            f" | top_k={retrieval.get('top_k')} | 语料分块={retrieval.get('chunk_size')}/"
-            f"{retrieval.get('chunk_overlap')} | {meta.get('generated_at')}")
+    method = retrieval.get("method", "?")
+    if retrieval.get("offline_stand_in"):
+        method += "（离线替身）"
+    detail = f"检索={method} top_k={retrieval.get('top_k')}"
+    if retrieval.get("candidate_k"):
+        detail += f" 候选={retrieval.get('candidate_k')}"
+    if retrieval.get("rerank"):
+        detail += f" 重排={retrieval.get('rerank_model')}"
+    return (f"{meta.get('name')} | 模式={meta.get('mode')} 裁判={meta.get('judge')} | {detail}"
+            f" | 语料分块={retrieval.get('chunk_size')}/{retrieval.get('chunk_overlap')}"
+            f" | {meta.get('generated_at')}")
 
 
 def render(reports: list[dict], labels: list[str], worst: int = 0) -> str:
