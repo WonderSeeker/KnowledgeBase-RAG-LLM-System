@@ -254,7 +254,8 @@ def score_with_heuristic(records: list[dict]) -> tuple[dict, list[dict]]:
 
 
 # --------------------------------------------------------------------------- 主流程
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    """argv 留出参数位，便于 experiments.py 以函数方式驱动多组实验"""
     parser = argparse.ArgumentParser(description="RAGAS 评测")
     parser.add_argument("--mode", choices=["real", "mock"], default="real",
                         help="real=真模型+RAGAS；mock=离线自检（不联网、不需要 Key）")
@@ -266,6 +267,12 @@ def main() -> int:
                         help="检索策略：vector 纯向量 / bm25 纯关键词 / hybrid 混合（默认取 config）")
     parser.add_argument("--candidate-k", type=int, default=None,
                         help="粗排候选数（混合检索与重排从这批候选里精选）")
+    parser.add_argument("--collection", default=None,
+                        help="检索哪个向量库集合（分块对比实验用，配合 scripts/ingest.py --collection）")
+    parser.add_argument("--chunk-size", type=int, default=None,
+                        help="分块参数：离线模式真实生效；real 模式只用于记录（检索不切分，参数由入库时决定）")
+    parser.add_argument("--chunk-overlap", type=int, default=None,
+                        help="分块重叠：同上。注意用 None 判断，0 是合法值")
     parser.add_argument("--rerank", dest="rerank", action="store_true", default=None,
                         help="开启 DashScope 重排（gte-rerank-v2）")
     parser.add_argument("--no-rerank", dest="rerank", action="store_false",
@@ -277,7 +284,7 @@ def main() -> int:
     parser.add_argument("--judge-model", default="qwen-plus", help="裁判模型名（打分用，别用太慢的模型）")
     parser.add_argument("--limit", type=int, default=None, help="只跑前 N 条，调试用")
     parser.add_argument("--reuse", default=None, help="复用已有的 runs jsonl，跳过 RAG 链路只重新打分")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     judge = args.judge or ("heuristic" if args.mode == "mock" else "ragas")
     # 阶段 3：把命令行开关写回 config，检索器是在后面才构造的，所以这里覆盖有效
@@ -285,6 +292,12 @@ def main() -> int:
         config.retrieval_method = args.retriever
     if args.rerank is not None:
         config.rerank_enabled = args.rerank
+    if args.collection:
+        config.collection_name = args.collection
+    if args.chunk_size is not None:
+        config.chunk_size = args.chunk_size
+    if args.chunk_overlap is not None:          # 0 是合法重叠度，所以用 is not None 判断
+        config.chunk_overlap = args.chunk_overlap
     top_k = args.top_k if args.top_k is not None else config.retrieve_k
     candidate_k = args.candidate_k if args.candidate_k is not None else config.candidate_k
     if args.out:
@@ -297,8 +310,9 @@ def main() -> int:
     started = time.perf_counter()
     print("=" * 78)
     print(f"[评测] 实验名={args.name} 模式={args.mode} 裁判={judge}")
-    print(f"[评测] 检索：策略={config.retrieval_method} top_k={top_k} 候选={candidate_k} "
-          f"重排={'开' if config.rerank_enabled else '关'}")
+    print(f"[评测] 检索：策略={config.retrieval_method} 集合={config.collection_name} top_k={top_k} "
+          f"候选={candidate_k} 重排={'开' if config.rerank_enabled else '关'}")
+    print(f"[评测] 分块：{config.chunk_size}/{config.chunk_overlap}")
     print("=" * 78)
 
     # 1) 拿答案与检索片段

@@ -67,12 +67,22 @@ def extract_text(file_bytes: bytes, filename: str, encoding: str = "utf-8") -> s
 
 
 class KnowledgeBaseService(object):
-    def __init__(self):
+    def __init__(self, chunk_size=None, chunk_overlap=None, collection_name=None):
+        """可以覆盖分块参数与集合名（阶段 3 做分块对比实验时，每组参数入一个独立集合）
+
+        :param chunk_size: 覆盖 config.chunk_size
+        :param chunk_overlap: 覆盖 config.chunk_overlap
+        :param collection_name: 覆盖 config.collection_name
+        """
+        self.chunk_size = config.chunk_size if chunk_size is None else chunk_size
+        self.chunk_overlap = config.chunk_overlap if chunk_overlap is None else chunk_overlap
+        self.collection_name = collection_name or config.collection_name
+
         # 如果文件夹不存在则创建，如果存在则跳过
         os.makedirs(config.persist_directory,exist_ok=True)
 
         self.chroma=Chroma(          # 向量存储的示例 Chroma向量库对象
-            collection_name=config.collection_name,      #数据库表名
+            collection_name=self.collection_name,        #数据库表名
             # 改造：原来这里硬编码 "text-embedding-v4"，与 rag.py 走 config 的写法不一致，
             # 一旦改配置就会出现「入库用 A 模型、检索用 B 模型」导致检索失效
             embedding_function=DashScopeEmbeddings(model=config.embedding_model_name),
@@ -80,8 +90,8 @@ class KnowledgeBaseService(object):
             client_settings=CHROMA_SETTINGS,              # 关闭匿名遥测，避免脏日志
         )      # 向量存储的实例，Chroma向量库对象
         self.spliter=RecursiveCharacterTextSplitter(  # 文本分割器的对象
-            chunk_size=config.chunk_size,             # 分割后的文本段最大长度
-            chunk_overlap=config.chunk_overlap,       # 连续文本段之间的字符重叠数量
+            chunk_size=self.chunk_size,               # 分割后的文本段最大长度
+            chunk_overlap=self.chunk_overlap,         # 连续文本段之间的字符重叠数量
             separators=config.separators,             # 自然段落划分的符号
             length_function=len,                      # 使用python自带的len函数做长度统计的依赖
         )      # 文本分割器的对象
@@ -99,7 +109,8 @@ class KnowledgeBaseService(object):
 
         # 基线观测：记录下来，方便核对分块参数的实际效果
         print(f"[入库] 文件={filename} 原文长度={len(data)} 切分片段数={len(knowledge_chunks)} "
-              f"(chunk_size={config.chunk_size} chunk_overlap={config.chunk_overlap})")
+              f"(chunk_size={self.chunk_size} chunk_overlap={self.chunk_overlap} "
+              f"集合={self.collection_name})")
 
         metadata={
             "source":filename,

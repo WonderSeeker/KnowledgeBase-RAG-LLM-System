@@ -72,19 +72,21 @@ def render(reports: list[dict], labels: list[str], worst: int = 0) -> str:
         # 只用纯文本标记：Windows 控制台是 GBK，emoji 会让 print 抛 UnicodeEncodeError
         lines += ["", f"> **[警告]** {warnings[0]}"]
 
-    # ---- 指标表 ----
+    # ---- 指标表（支持 1 份 / 2 份 / N 份：N 份时以第一份为基准算 Δ）----
     lines += ["", "## 指标对比", ""]
-    if len(reports) == 2:
-        lines += ["| 指标 | " + labels[0] + " | " + labels[1] + " | Δ | 变化 |", "|---|---|---|---|---|"]
-    else:
-        lines += ["| 指标 | " + labels[0] + " |", "|---|---|"]
+    header = "| 指标 | " + " | ".join(labels) + " |"
+    separator = "|" + "---|" * (len(labels) + 1)
+    if len(reports) >= 2:
+        header += " Δ(末-首) | 变化 |"
+        separator += "---|---|"
+    lines += [header, separator]
     for name in METRIC_NAMES:
         values = [r.get("metrics", {}).get(name) for r in reports]
-        if len(reports) == 2:
-            diff, pct = delta_text(values[0], values[1])
-            lines.append(f"| {name}<br>{METRIC_CN[name]} | {fmt(values[0])} | {fmt(values[1])} | {diff} | {pct} |")
-        else:
-            lines.append(f"| {name}<br>{METRIC_CN[name]} | {fmt(values[0])} |")
+        row = f"| {name}<br>{METRIC_CN[name]} | " + " | ".join(fmt(v) for v in values) + " |"
+        if len(reports) >= 2:
+            diff, pct = delta_text(values[0], values[-1])
+            row += f" {diff} | {pct} |"
+        lines.append(row)
     lines.append("")
 
     # ---- 运行开销 ----
