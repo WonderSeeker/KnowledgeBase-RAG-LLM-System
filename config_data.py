@@ -29,8 +29,16 @@ separators =["\n\n","\n",".","!","?","。","！","？"," ",""]
 max_spliter_char_number= 1000  # 文本分割阈值
 
 # 检索返回的片段数量（k）
-retrieve_k = 1     # ⚠️ 基线值 1：只把 1 个片段喂给大模型，是 context_recall 的天花板
+retrieve_k = 1     # 基线值 1：只把 1 个片段喂给大模型，是 context_recall 的天花板
 similarity_threshold = retrieve_k   # 兼容旧名（原项目拿这个名字当 k 用，命名与用途不符）
+
+# ---------------- 阶段 3：检索策略 ----------------
+# vector 纯向量 / bm25 纯关键词 / hybrid 混合检索（RRF 融合）
+retrieval_method = "vector"
+candidate_k = 10              # 粗排候选数：混合检索与重排都从这批候选里再做精选
+rrf_k = 60                    # RRF 融合常数（经验值 60：越大越强调"两路检索都靠前"）
+rerank_enabled = False        # 是否开启重排
+rerank_model = "gte-rerank-v2"   # DashScope 重排模型（用 dashscope SDK 的 TextReRank 调用）
 
 embedding_model_name="text-embedding-v4"
 chat_model_name="qwen3-max"

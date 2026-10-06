@@ -7,6 +7,7 @@ import time
 import  config_data as config
 import  hashlib
 from langchain_chroma import Chroma
+from vector_stores import CHROMA_SETTINGS
 from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from datetime import datetime
@@ -76,6 +77,7 @@ class KnowledgeBaseService(object):
             # 一旦改配置就会出现「入库用 A 模型、检索用 B 模型」导致检索失效
             embedding_function=DashScopeEmbeddings(model=config.embedding_model_name),
             persist_directory=config.persist_directory,   #数据库本地存储文件夹
+            client_settings=CHROMA_SETTINGS,              # 关闭匿名遥测，避免脏日志
         )      # 向量存储的实例，Chroma向量库对象
         self.spliter=RecursiveCharacterTextSplitter(  # 文本分割器的对象
             chunk_size=config.chunk_size,             # 分割后的文本段最大长度

@@ -1,0 +1,14 @@
+# 阶段 3 检索优化依赖（混合检索 + 重排）
+#
+# 安装方式（项目根目录；必须带 constraints，否则可能顺手升级主依赖）：
+#   $env:PYTHONUTF8='1'
+#   .\.venv\Scripts\python.exe -m pip install -r requirements-optim.txt -c evaluation\constraints-eval.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+#
+# 为什么是这两个：
+#   rank-bm25  BM25 关键词召回，与向量召回互补（专有名词、型号、数值类问题靠它兜底）
+#   jieba      中文分词。BM25 需要"词"而非字符，不分词的中文 BM25 效果会明显偏弱
+#
+# 重排（Rerank）不额外装包：直接用已装的 dashscope SDK 的 TextReRank（模型 gte-rerank-v2）
+
+rank-bm25==0.2.2
+jieba==0.42.1

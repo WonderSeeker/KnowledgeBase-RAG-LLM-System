@@ -4,6 +4,13 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableWithMessageHistory, RunnableLambda
 from file_history_store import get_history
 from vector_stores import VectorStoreService
+from retrievers import (
+    DashScopeReranker,
+    VectorRetriever,
+    build_retriever,
+    describe as describe_retriever,
+    load_all_documents,
+)
 from langchain_community.embeddings import DashScopeEmbeddings
 import config_data as config
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -25,6 +32,9 @@ class RagService(object):
             embedding=DashScopeEmbeddings(model=config.embedding_model_name)
         )
 
+        # 阶段 3：检索策略由 config.retrieval_method 决定（vector / bm25 / hybrid）
+        self.retriever = self.__build_retriever()
+
         self.prompt_template = ChatPromptTemplate.from_messages(
             [
                 ("system", "以我提供的已知参考资料为主，"
@@ -39,12 +49,44 @@ class RagService(object):
 
         self.chain = self.__get_chain()
 
+    def __build_retriever(self):
+        """按 config.retrieval_method 组装检索器（阶段 3）
+
+        - vector：纯向量检索
+        - bm25  ：纯关键词检索
+        - hybrid：两路召回 → RRF 融合 →（可选）重排
+        """
+        method = config.retrieval_method
+
+        # BM25 需要全量片段做语料；直接读向量库，保证两路面对同一份语料
+        documents = load_all_documents(self.vector_service.vector_store) if method in ("bm25", "hybrid") else []
+        if method in ("bm25", "hybrid") and not documents:
+            print("[检索] 警告：向量库为空，BM25 无米下锅，请先用 scripts/ingest.py 入库")
+
+        vector_leg = None
+        if method in ("vector", "hybrid"):
+            vector_leg = VectorRetriever(self.vector_service, k=config.candidate_k)
+
+        reranker = DashScopeReranker() if config.rerank_enabled else None
+
+        print("[检索] " + describe_retriever(method, config.retrieve_k, config.candidate_k,
+                                            config.rerank_enabled))
+        return build_retriever(
+            method,
+            vector_leg=vector_leg,
+            documents=documents,
+            k=config.retrieve_k,
+            candidate_k=config.candidate_k,
+            rrf_k=config.rrf_k,
+            reranker=reranker,
+        )
+
     def retrieve(self, question: str) -> list[Document]:
         """单独执行一次检索，返回命中的文档片段
 
         从链里把检索步骤抽出来，供脚本 / 评测 / 调试直接调用（阶段 2 的 RAGAS 需要拿到 contexts）
         """
-        return self.vector_service.get_retriever().invoke(question)
+        return self.retriever.invoke(question)
 
     def answer(self, question: str, session_id: str = "user_001") -> dict:
         """一次性问答，返回答案 + 命中片段 + 分段耗时（供命令行与评测使用）
@@ -77,7 +119,8 @@ class RagService(object):
     def __get_chain(self):
         """获取最终的执行链"""
 
-        retriever = self.vector_service.get_retriever()
+        # 阶段 3：检索器已按 config 组装好（向量 / BM25 / 混合 + 可选重排），这里只做 Runnable 包装
+        retriever = RunnableLambda(self.retriever.invoke)
 
         def format_document(docs: list[Document]):
             # 基线观测：每次检索实际命中的片段数（当前 = config.retrieve_k）
