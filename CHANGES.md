@@ -218,46 +218,71 @@ cd D:\Projects\KnowledgeBase-RAG-LLM-System
    重排依赖外部 API，网络/额度任何一环抖动都不该让问答挂掉。当前实现失败时退回粗排顺序并打警告，
    无 Key 时同样降级（已实测）。
 
-### 4.3 三种检索策略实测（⚠️ 离线启发式，不是 RAGAS）
+### 4.3 检索策略对比（⚠️ 离线启发式，不是 RAGAS）—— **k 已对齐**
 
-同一套 29 条评测集，只改检索策略：
+**先纠正一版错误结论。** 阶段 3 第一版的表里 vector 用 `k=1`、bm25/hybrid 用 `k=4`，
+于是我写下了"混合检索召回 +7.3%"。这个对比是无效的：k 不同时，检索片段数不同，
+`context_precision` / `context_recall` 天然不可比（返回 4 条当然比返回 1 条噪声多）。
 
-| 指标 | vector（top_k=1） | bm25（top_k=4） | hybrid（top_k=4，候选 6） |
+补上 `vector(k=4)` 对照、三路统一在 **k=4** 后，真实情况是：
+
+| 指标（29 条评测集，k 全部 = 4，候选 12） | vector | bm25 | hybrid |
 |---|---|---|---|
 | faithfulness | 0.9655 | 0.9310 | 0.9655 |
 | answer_relevancy | 0.2146 | 0.2105 | 0.2146 |
-| **context_recall** | 0.6972 | 0.7159 | **0.7481** |
-| context_precision | 0.6972 | 0.4793 | 0.4313 |
-| 平均检索片段数 | 0.97 | — | 3.0 |
+| context_recall | 0.7468 | 0.7159 | **0.7481** |
+| context_precision | 0.4610 | **0.4793** | 0.4313 |
 
-混合检索的召回高于任一路单独使用，符合 RRF 的设计预期。
+**结论修正**：
+
+1. 之前那个 **+7.3% 主要来自 `k` 从 1 提到 4，不是混合检索的功劳**。
+   单看 vector：`k=1` 召回 0.6972 → `k=4` 召回 0.7468（+7.1%）。
+2. **k 对齐后，三种策略差异很小**（召回 0.7159~0.7481，极差 3.2%），
+   hybrid 的 precision 反而最低（0.4313 vs vector 0.4610，-6.4%）。
+3. 原因很明确：**离线模式的"向量腿"本身就是字面检索替身**，
+   于是 hybrid = 字面 + 字面，两路同源，RRF 融合自然拿不到额外增益。
+   这是评测替身的固有局限，不是 BM25/RRF 实现有问题。
+
+> **所以：混合检索与重排的真实增益，必须在 `--mode real`（真向量检索）下才能测出来。**
+> 离线表只能证明「流程正确」和「指标对 k 敏感」这两件事。
+
+为了以后不再犯同样的错，`report.py` 现在会**主动拦截** k 不一致的对比：
+各报告 `top_k` 不同时，终端与 Markdown 里都会打印口径不一致的警告。
 
 ### 4.4 分块参数对比实验（⚠️ 离线启发式，不是 RAGAS）
 
-`evaluation/experiments.py --mode mock --configs 300/30,600/60,1000/100 --retriever hybrid --top-k 4 --candidate-k 12`
+`evaluation/experiments.py --mode mock --name chunk --configs 150/15,300/30,600/60,1000/100 --retriever hybrid --top-k 4 --candidate-k 32`
 
-| 指标 | 300/30 | 600/60 | 1000/100 |
-|---|---|---|---|
-| 语料片段总数（`--dry-run` 实测） | 15 | 9 | 6 |
-| context_recall | 0.7210 | 0.7439 | **0.7481** |
-| context_precision | 0.3296 | 0.3774 | **0.4313** |
-| answer_relevancy | **0.2875** | 0.2501 | 0.2146 |
+（四组统一 `top_k=4` / `candidate_k=32`，只改分块参数）
 
-分块越小 → 片段越聚焦、答案相关性越高，但召回略降；分块越大 → 召回略升，但噪声更多。
-这是一条真实的权衡曲线，不是"某组参数一定最好"，需要按业务取舍。
+| 指标 | 150/15 | 300/30 | 600/60 | 1000/100 |
+|---|---|---|---|---|
+| 语料片段总数（`--dry-run` 实测） | 32 | 15 | 9 | 6 |
+| context_recall | 0.6633 | 0.7210 | 0.7439 | **0.7481** |
+| context_precision | 0.2835 | 0.3296 | 0.3774 | **0.4313** |
+| answer_relevancy | **0.3409** | 0.2875 | 0.2501 | 0.2146 |
+| faithfulness | 0.9655 | 0.9655 | 0.9655 | 0.9655 |
 
-### 4.5 这一步挖出来的 4 个真问题
+趋势单调、方向合理：**分块越小 → 片段越聚焦、答案相关性越高，但召回与精度下降；
+分块越大 → 相反**。这是一条真实的权衡曲线，不是"某组参数一定最好"。
 
-1. **`max_spliter_char_number = 1000` 让"调小 chunk_size"对短文档完全无效**
-   `尺码推荐.txt` 只有 270 字，无论 `chunk_size` 设 300 还是 1500，永远是 1 个片段（`--dry-run` 实测）。
-   也就是说这份最需要精确检索的尺码表，永远无法被拆开检索。
-   → 阶段 4 建议把这套"先判长度再切分"的逻辑收敛成单纯的 splitter。
+其中 300/30 与 600/60 两组数值与修复分块缺陷**之前**完全一致——这是预期内的回归验证：
+这两个配置的 `chunk_size` 都 ≥「尺码推荐.txt」的 270 字，修复前后该文件都是 1 个片段。
+真正体现差异的是新增的 150/15（修复前它同样只有 1 个片段，修复后是 2 个，详见 4.8）。
+
+### 4.5 这一步挖出来的问题
+
+1. **`max_spliter_char_number = 1000` 让"调小 chunk_size"对短文档完全无效** —— 已修复，见 4.8。
 2. **语义改写类问题是字面检索的死角**
    `color-06「怎样穿显得更瘦？」` 在离线替身下 **0 命中**——语料里写的是"显瘦搭配"，
    字面/BM25 都匹配不上，只有真向量检索能救。这条样本正好是验证向量检索价值的标杆。
 3. **基线的 `top_k=1` 有 3% 的问题直接 0 命中**（平均片段数 0.97），等于大模型收到"无相关参考资料"。
-4. **Chroma 匿名遥测在 stderr 刷错误日志**（新版 posthog 与 chromadb 0.4.x 不兼容），
-   已通过 `Settings(anonymized_telemetry=False)` 关闭。
+4. **对比实验的口径必须显式校验** —— 已由 `report.py` 的 k 一致性检查兜住（见 4.3）。
+5. **Chroma 遥测报错刷 stderr** —— 根因不是"遥测没关"，而是 **chromadb 0.4.24 的 posthog 适配层
+   用 3 个位置参数调 `posthog.capture`，新版 posthog 只接受 1 个**，异常发生在签名校验阶段，
+   所以 `Settings(anonymized_telemetry=False)`（只置 `posthog.disabled`）挡不住这行 `logger.error`。
+   现改为定向把 `chromadb.telemetry.product.posthog` 这个 logger 提到 CRITICAL：
+   既不发数据、也不再刷日志（已用真实入库链路验证无该输出）。
 
 ### 4.6 命令
 
@@ -268,10 +293,16 @@ cd D:\Projects\KnowledgeBase-RAG-LLM-System
 .\.venv\Scripts\python.exe scripts\ingest.py --dry-run --chunk-size 300 --chunk-overlap 30
 
 # 离线跑通实验流程（分块真实生效，检索与打分用离线替身）
-.\.venv\Scripts\python.exe evaluation\experiments.py --mode mock --configs 300/30,600/60,1000/100 --retriever hybrid --top-k 4
+.\.venv\Scripts\python.exe evaluation\experiments.py --mode mock --name chunk ^
+    --configs 150/15,300/30,600/60,1000/100 --retriever hybrid --top-k 4 --candidate-k 32
+
+# 检索策略对比：★ 必须显式固定 --top-k，否则 context_precision 不可比
+.\.venv\Scripts\python.exe evaluation\experiments.py --mode mock --name alignk4 ^
+    --configs 1000/100 --retrievers vector,bm25,hybrid --top-k 4 --candidate-k 12
 
 # 真实实验（需要 Key）：每组分块参数入独立集合，再用 RAGAS 打分
-.\.venv\Scripts\python.exe evaluation\experiments.py --mode real --name chunk --configs 500/50,1000/100,1500/200 --retriever hybrid --top-k 4 --candidate-k 10 --rerank
+.\.venv\Scripts\python.exe evaluation\experiments.py --mode real --name chunk ^
+    --configs 500/50,1000/100,1500/200 --retriever hybrid --top-k 4 --candidate-k 10 --rerank
 
 # 基线 vs 优化 的真实对比表
 .\.venv\Scripts\python.exe evaluation\report.py evaluation\report_baseline.json evaluation\report_optimized.json --out evaluation\REPORT.md
@@ -282,9 +313,69 @@ cd D:\Projects\KnowledgeBase-RAG-LLM-System
 - [x] BM25 + 向量混合检索（RRF 融合）
 - [x] Rerank 接入（DashScope `gte-rerank-v2`），失败降级已实测
 - [x] 分块大小/重叠度对比实验流程（`--dry-run` 试算 + 多组评测 + 横向表）
-- [x] 「改造前 vs 改造后」对比表能力（`report.py` 支持 1/N 份报告）
+- [x] 「改造前 vs 改造后」对比表能力（`report.py` 支持 1/N 份报告，且会拦截 k 不一致的对比）
+- [x] 对比实验的 k 已对齐（4.3 的修正表）
+- [x] `chunk_size` 对短文档失效的缺陷已修复（4.8）
 - [ ] **真实 `report_optimized.json` 与真实对比表** —— 阻塞在 `DASHSCOPE_API_KEY`
-- [ ] 重排的真实收益数字 —— 需要 Key 才能测
+- [ ] 混合检索 / 重排的真实收益数字 —— 必须 `--mode real` 才能测（离线替身下两路同源，见 4.3）
+
+---
+
+### 4.8 缺陷修复记录：`chunk_size` 对短文档完全失效
+
+**缺陷**（原项目遗留，非本次改造引入）
+
+`knowledge_base.upload_by_str` 用 `max_spliter_char_number(=1000)` 做**硬门槛**：
+
+```python
+if len(data) > config.max_spliter_char_number:
+    knowledge_chunks = self.spliter.split_text(data)
+else:
+    knowledge_chunks = [data]          # ← ≤1000 字的文档一律不切分
+```
+
+后果：「尺码推荐.txt」只有 270 字，**无论 `chunk_size` 设 300 还是 1500，永远是 1 个片段**。
+分块参数对短文档彻底失效——而这份尺码表恰恰是最需要精确检索（只想召回相关那几行）的内容。
+这个门槛在本轮分块对比实验里第一次被暴露出来（见 4.4 的 `--dry-run` 实测）。
+
+**修复**
+
+判定统一交给 splitter：文本短于 `chunk_size` 时它自己就会返回 1 个片段，
+文本更长时按 `chunk_size`/`chunk_overlap` 切分。语义单一、`chunk_size` 真实生效。
+`max_spliter_char_number` 保留为配置项（兼容旧代码），但**不再参与任何判定**，
+三处判定（`knowledge_base.py` / `evaluation/offline.py` / `scripts/ingest.py --dry-run`）同步收敛。
+
+**证据 1：切分行为前后对照（`chunk_size=150, chunk_overlap=15`）**
+
+| | 片段数 | 各片段长度 |
+|---|---|---|
+| 修复前 | **1** | 270（被 1000 的硬门槛挡掉，`chunk_size` 失效） |
+| 修复后 | **2** | 133, 135 |
+
+**证据 2：真实入库链路端到端验证**（用 `FakeEmbeddings` 绕开 API Key，但走完整的
+`KnowledgeBaseService.upload_by_str` → 切分 → 写 Chroma → MD5 去重）
+
+```
+[入库] 文件=尺码推荐.txt 原文长度=270 切分片段数=2 (chunk_size=150 chunk_overlap=15 集合=probe150b)
+返回 = [Success]内容已经成功载入向量库（2 个片段，耗时 0.00s）
+集合内片段数 = 2
+各片段长度 = [135, 133]
+重复入库 = [Repeat] 内容已存在知识库          ← 去重逻辑未被破坏
+```
+
+**证据 3：`--dry-run` 全量扫描（修复后）**
+
+| chunk_size/overlap | 尺码推荐.txt | 洗涤养护.txt | 颜色推荐.txt | 合计 |
+|---|---|---|---|---|
+| 150/15 | **2** | 19 | 11 | 32 |
+| 300/30 | 1（270 < 300，理应 1 个） | 9 | 5 | 15 |
+| 1500/200 | 1 | 2 | 1 | 4 |
+
+> 注：`300/30` 下「尺码推荐.txt」仍是 1 个片段是**正确行为**——原文 270 字短于 chunk_size=300。
+> 修复要解决的是"150/15 也切不出来"，而不是"任何配置都必须切出多段"。
+
+**对分块实验的影响**：新增了 `150/15` 这一组（修复前它和 300/30 的结果无区别），
+三组原有配置（300/30、600/60、1000/100）数值与修复前完全一致，说明修复没有副作用。
 
 ---
 
