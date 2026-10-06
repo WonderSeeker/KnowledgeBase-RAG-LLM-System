@@ -379,9 +379,105 @@ else:
 
 ---
 
-## 五、阶段 4
+## 五、阶段 4：工程化包装
 
-（未开始）
+### 5.1 FastAPI 接口（端口 8020，svc.ps1 短名 `kbapi`）
+
+| 端点 | 作用 | 是否需要 Key |
+|---|---|---|
+| `GET /health` | 状态 + Key 是否配置 + 语料规模 + 当前检索配置 | 否（缺 Key 也返回 200，状态为 `degraded`） |
+| `GET /config` | 当前检索/分块/模型/路径配置，用于确认实验条件 | 否 |
+| `POST /chat` | 问答：`{question, session_id}` → 答案 + 命中片段 + 分段耗时 | 是 |
+| `GET /docs` | Swagger 自文档 | 否 |
+
+错误语义（**不返回 500 堆栈，全部是可操作的明确错误**）：
+
+| 状态码 | error | 触发条件 | 提示内容 |
+|---|---|---|---|
+| 503 | `api_key_missing` | 未配置 `DASHSCOPE_API_KEY` | 把 Key 填进 `.env` 后 `.\svc.ps1 restart kbapi` |
+| 503 | `knowledge_base_empty` | 向量库片段数为 0 | 先跑 `scripts\ingest.py` 入库 |
+| 502 | `upstream_error` | 模型服务调用失败 | 检查 Key 有效性/网络，或看 `_logs\kbapi.out` |
+| 422 | — | 参数校验失败（如空问题） | Pydantic 标准结构 |
+
+设计要点：
+
+1. **`RagService` 懒加载**：服务能先起来，`/health` 随时可用，不会因为缺 Key 就启动失败；
+2. **门禁顺序**：先查 Key（`/chat` 的 503 判断在 `import rag` 之前），
+   这一点很关键——`DashScopeEmbeddings` 在**构造时**就校验 Key，若顺序反了会变成 500 堆栈；
+3. 输出不用 emoji（Windows 控制台 GBK）。
+
+### 5.2 ★ 致命缺陷：`RagService` 完全无法构造（上游遗留，本次发现并修复）
+
+**现象**：`from rag import RagService` 直接抛
+
+```
+ImportError: cannot import name 'RunnableWithMessageHistory' from 'langchain_core.runnables'
+```
+
+**根因**：`langchain-core 0.1.53` 的 `runnables/__init__.py` **并不导出** `RunnableWithMessageHistory`
+（实测 `dir(langchain_core.runnables)` 里没有它），正确路径是子模块
+`langchain_core.runnables.history`。该行是**上游原项目的代码**（`git show HEAD~5:rag.py` 可见），
+不是本次改造引入的。
+
+**影响面（这才是真正严重的地方）**：
+
+- `RagService` 是问答链路的入口，构造失败 = **整个系统无法回答任何问题**；
+- 它是**潜伏缺陷**：Streamlit 首页能打开、`/health` 返回 200、评测在 mock 模式下全绿，
+  因为 mock 模式走的是离线检索替身、**从不 import `rag`**；
+  而 `/chat` 的 503 门禁又在 `import rag` 之前返回。
+  → 直到阶段 4 用假 Key 触发 `RagService()` 构造，才把它逼出来。
+
+**修复**：改用正确模块路径，并加注释说明为什么不能改回去。
+
+**证据（假 Key 下构造，构造阶段不发网络请求）**：
+
+```
+[检索] 策略=vector，最终 k=1，重排=关
+  [OK] vector 检索器 = HybridRetriever | chain = RunnableWithMessageHistory
+[检索] 策略=bm25，最终 k=1，重排=关
+  [OK] bm25 检索器 = HybridRetriever
+[检索] 策略=hybrid，最终 k=1，粗排候选=10，重排=开（gte-rerank-v2）
+  [OK] hybrid 检索器 = HybridRetriever | 重排器 = DashScopeReranker | 模型 = gte-rerank-v2
+[OK] config_data / file_history_store / vector_stores / knowledge_base / retrievers / rag / server 全部导入成功
+```
+
+**教训**：`ImportError` 这类"整条链路不可用"的缺陷，必须靠**导入全量模块**的冒烟测试兜住，
+只跑评测（走替身路径）是发现不了的。本项目的导入冒烟命令：
+
+```powershell
+.\.venv\Scripts\python.exe -c "import config_data, file_history_store, vector_stores, knowledge_base, retrievers, rag, server; print('全部导入成功')"
+```
+
+### 5.3 顺带修复：`/health` 路径漏掉遥测屏蔽
+
+`server.py` 最初自己 `new` 了一个 `chromadb.config.Settings`，绕过了
+`vector_stores` 里的遥测 logger 屏蔽，于是 `/health` 每被调用一次就往 stderr 刷一行
+`Failed to send telemetry event ...`。现改为复用 `vector_stores.CHROMA_SETTINGS`
+（导入即触发屏蔽）。实测 `_logs\kbapi.err` 已干净：
+
+```
+INFO:     Started server process [24660]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8020 (Press CTRL+C to quit)
+```
+
+### 5.4 指标口径说明（`report.py`）
+
+新增「指标口径说明」小节，**逐条**写明每个指标在两种口径下的真实算法
+（离线启发式 = 字符二元组重叠率，不调用任何模型；RAGAS = 裁判 LLM 判定）。
+原因：同名指标在 mock 与 real 下算法完全不同，只看表头必然误读。
+若一张表里混了两种口径，会额外插入「数值不可互相比较」的警告。
+
+### 5.5 阶段 4 剩余项
+
+- [x] a) FastAPI 包装（端口 8020，`/health` + `/chat`，缺 Key 返回明确错误）
+- [x] b) 注册进 `svc.ps1`（短名 `kbapi`，BOM/CRLF/语法均校验通过）
+- [ ] c) README 骨架（架构图 + 检索策略说明 + 模块结构 + 缺陷清单 + 启动方式）
+- [ ] d) CHANGES.md 划定「有效产出 / 暂无效结论」两栏
+- [ ] 真实 `report_optimized.json` 与真实对比表（等 Key）
+- [ ] 重排的真实收益数字（等 Key）
+- [ ] 本地 LLM 替换云端（零成本对比，等通知）
 
 ---
 
