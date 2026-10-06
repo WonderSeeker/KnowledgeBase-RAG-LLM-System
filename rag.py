@@ -1,7 +1,12 @@
 import time
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough, RunnableWithMessageHistory, RunnableLambda
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda
+# 修复：langchain-core 0.1.53 的 runnables/__init__.py 并不导出 RunnableWithMessageHistory
+#   from langchain_core.runnables import RunnableWithMessageHistory   ← 上游原样，会 ImportError
+# 正确路径是 runnables.history 子模块。这条 import 失败会让 RagService 完全无法构造，
+# 而它只会在"真正发起问答"时暴露——Streamlit 首页能打开、/health 也正常，属于典型的潜伏缺陷。
+from langchain_core.runnables.history import RunnableWithMessageHistory
 from file_history_store import get_history
 from vector_stores import VectorStoreService
 from retrievers import (
