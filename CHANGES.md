@@ -499,6 +499,76 @@ INFO:     Uvicorn running on http://127.0.0.1:8020 (Press CTRL+C to quit)
 - [ ] 真实 `report_optimized.json` 与真实对比表
 - [ ] 本地 LLM 替换云端（零成本对比，等通知）
 
+### 5.6 本地嵌入服务接入规格（已实机核对，供第 3 步实施用）
+
+> 这一节固化接入前的实测结论。**尤其注意 preflight 的路径**——
+> 我最初写成 `GET /v1/health`，实测该路径不存在（404），若带进代码会造成最难查的故障：
+> 探测永远 404 → 判定"本地服务不可用" → **本地嵌入一次都不会被启用，而且不报错**，
+> 只是静默地永远走 dashscope 分支。
+
+**端点实测（`curl` 实测于本机，2026-10-07）**
+
+| 方法 | 路径 | 实测 | 说明 |
+|---|---|---|---|
+| GET | `/health` | **200** | 顶层健康检查，**preflight 用这个** |
+| GET | `/v1/models` | 200 | 返回 `qwen2.5-1.5b-instruct`、`bge-small-zh-v1.5` |
+| POST | `/v1/embeddings` | 422 | 缺 `input` 时返回 422（正常） |
+| POST | `/v1/chat/completions` | — | 对话（本轮不用） |
+| GET | `/v1/health` | **404** | ❌ 不存在，勿探测 |
+
+`GET /health` 实测返回：
+
+```json
+{
+  "status": "ok", "model": "qwen2.5-1.5b-instruct", "device": "cpu",
+  "chat":      {"model": "qwen2.5-1.5b-instruct", "loaded": false},
+  "embedding": {"model": "bge-small-zh-v1.5", "loaded": false, "available": true, "dim": null}
+}
+```
+
+**三个必须避开的坑**
+
+1. **`embedding.dim` 在模型未加载时是 `null`**（上面实测就是 `null`），要等第一次嵌入调用之后才变成 512。
+   → **不要**用它做 collection 维度校验，用下面的常量表（确定性、无副作用），
+   再在第一次嵌入调用之后用真实向量长度复核一次，不一致就抛错。
+2. **`loaded` 冷启动时是 `false`**（服务刻意做成懒加载——一次探活不该吃掉 200MB/3.1GB 内存）。
+   → 判断可用性**只能**用 `available`，**不要**把 `loaded=false` 当成不可用。
+3. **维度不一致绝不可混 collection**：DashScope `text-embedding-v4` 与本地 `bge-small-zh-v1.5` 维度不同，
+   混用会让相似度结果完全是垃圾。要按「嵌入后端 + 维度」隔离 collection（如 `rag_local`），
+   并把这两个字段写进 collection metadata，启动时不一致就报错退出。
+
+**维度常量表**（校验用；DashScope 一列需在真实调用后确认）
+
+```python
+EMBEDDING_DIMS = {
+    "dashscope": {"text-embedding-v4": 1024},   # 待真实调用复核
+    "local":     {"bge-small-zh-v1.5": 512},    # 服务 /health 声明，实测待复核
+}
+```
+
+**正确写法**
+
+```python
+LOCAL_BASE = "http://127.0.0.1:11434"
+
+def preflight_local():
+    try:
+        import httpx
+        r = httpx.get(f"{LOCAL_BASE}/health", timeout=3)   # ★ 顶层 /health，不是 /v1/health
+        r.raise_for_status()
+        info = r.json()
+    except Exception as e:
+        return False, (f"本地嵌入服务未启动（{e}）。\n"
+                       f"启动：cd D:\\Projects ; .\\svc.ps1 start llm")
+    emb = info.get("embedding", {})
+    if not emb.get("available"):
+        return False, "本地嵌入模型目录缺失（embedding.available=false）"
+    return True, emb.get("model")
+```
+
+**复用现有机制**：报告 meta 需同时记录 `k / collection / 嵌入后端 / 维度`，
+并把 5.1 里那条「k 不一致就拦截」扩展为「k、嵌入后端、维度任一不一致就拦截」。
+
 ---
 
 ## 六、结论有效性划定（写 README / 简历 / 汇报前必读）
