@@ -8,7 +8,7 @@ import  config_data as config
 import  hashlib
 from langchain_chroma import Chroma
 from vector_stores import CHROMA_SETTINGS
-from langchain_community.embeddings import DashScopeEmbeddings
+import embeddings as embeddings_module
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from datetime import datetime
 
@@ -67,16 +67,21 @@ def extract_text(file_bytes: bytes, filename: str, encoding: str = "utf-8") -> s
 
 
 class KnowledgeBaseService(object):
-    def __init__(self, chunk_size=None, chunk_overlap=None, collection_name=None):
-        """可以覆盖分块参数与集合名（阶段 3 做分块对比实验时，每组参数入一个独立集合）
+    def __init__(self, chunk_size=None, chunk_overlap=None, collection_name=None,
+                 embedding_backend=None):
+        """可以覆盖分块参数、集合名与嵌入后端
 
         :param chunk_size: 覆盖 config.chunk_size
         :param chunk_overlap: 覆盖 config.chunk_overlap
-        :param collection_name: 覆盖 config.collection_name
+        :param collection_name: 覆盖默认集合名（默认按嵌入后端区分：rag / rag_local）
+        :param embedding_backend: dashscope | local，覆盖 config.embedding_backend
         """
         self.chunk_size = config.chunk_size if chunk_size is None else chunk_size
         self.chunk_overlap = config.chunk_overlap if chunk_overlap is None else chunk_overlap
-        self.collection_name = collection_name or config.collection_name
+
+        # 嵌入后端：解析 profile → local 探活 → 实测真实维度（唯一权威来源）
+        self.profile, self.embeddings, self.embedding_dim = embeddings_module.prepare(embedding_backend)
+        self.collection_name = collection_name or embeddings_module.default_collection_name(embedding_backend)
 
         # 如果文件夹不存在则创建，如果存在则跳过
         os.makedirs(config.persist_directory,exist_ok=True)
@@ -85,10 +90,14 @@ class KnowledgeBaseService(object):
             collection_name=self.collection_name,        #数据库表名
             # 改造：原来这里硬编码 "text-embedding-v4"，与 rag.py 走 config 的写法不一致，
             # 一旦改配置就会出现「入库用 A 模型、检索用 B 模型」导致检索失效
-            embedding_function=DashScopeEmbeddings(model=config.embedding_model_name),
+            embedding_function=self.embeddings,
             persist_directory=config.persist_directory,   #数据库本地存储文件夹
             client_settings=CHROMA_SETTINGS,              # 关闭匿名遥测，避免脏日志
         )      # 向量存储的实例，Chroma向量库对象
+        # 指纹校验：集合里的向量必须与当前嵌入后端/维度一致，否则直接报错退出
+        embeddings_module.verify_and_stamp(
+            self.chroma._collection, self.profile, self.embedding_dim, self.collection_name
+        )
         self.spliter=RecursiveCharacterTextSplitter(  # 文本分割器的对象
             chunk_size=self.chunk_size,               # 分割后的文本段最大长度
             chunk_overlap=self.chunk_overlap,         # 连续文本段之间的字符重叠数量
@@ -113,9 +122,9 @@ class KnowledgeBaseService(object):
         # 基线观测：记录下来，方便核对分块参数的实际效果
         print(f"[入库] 文件={filename} 原文长度={len(data)} 切分片段数={len(knowledge_chunks)} "
               f"(chunk_size={self.chunk_size} chunk_overlap={self.chunk_overlap} "
-              f"集合={self.collection_name})")
+              f"集合={self.collection_name} 嵌入={self.profile.backend}/{self.embedding_dim}维)")
 
-        metadata={
+        base_metadata={
             "source":filename,
             #2026-3-8 15:43:30
             "create_time":datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -123,11 +132,16 @@ class KnowledgeBaseService(object):
         }
 
         start_time=time.perf_counter()   # 基线观测：记录向量化 + 写库耗时
+        # 缺陷修复（上游遗留，静默型）：LangChain 的参数名是 metadatas（复数），
+        # 原项目写成 metadata（单数）→ 落进 **kwargs 被静默忽略 → 所有片段元数据全丢
+        # （实测 6/6 片段的 metadata 都是 None）。
+        # 后果：不知道片段来自哪个文档、format_document 拼给模型的是空元数据、
+        #       文档级归因（IR 指标 / 分块实验的按文档统计）完全做不了。
         self.chroma.add_texts(        # 内容加载到向量库中
             # iterable-> list \tuple
             knowledge_chunks,
-            metadata=[metadata for _ in knowledge_chunks],
-
+            metadatas=[{**base_metadata, "chunk_index": index}
+                       for index, _ in enumerate(knowledge_chunks)],
         )
         cost=time.perf_counter()-start_time
         save_md5(md5_hex)
