@@ -33,6 +33,7 @@ class EvalItem:
     ground_truth: str
     source: str                      # 标准答案出自哪个语料文件
     tags: list[str] = field(default_factory=list)   # 问题类型标签，便于分难度看指标
+    relevant_sources: list[str] = field(default_factory=list)   # 应命中的文档（1~2 个）；留空则回退到 source
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -45,7 +46,16 @@ class EvalItem:
             ground_truth=data["ground_truth"],
             source=data.get("source", ""),
             tags=list(data.get("tags") or []),
+            relevant_sources=list(data.get("relevant_sources") or []),
         )
+
+    @property
+    def relevant_docs(self) -> list[str]:
+        """IR 评测用的正例文档集合：优先 relevant_sources，否则用 source
+
+        文档级标注口径就建立在这个字段上，所以它必须确定、可复现、能被人一眼看懂。
+        """
+        return self.relevant_sources or ([self.source] if self.source else [])
 
 
 def _item(idx: str, question: str, ground_truth: str, source: str, tags: list[str]) -> EvalItem:

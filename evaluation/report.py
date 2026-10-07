@@ -18,13 +18,18 @@ import argparse
 import json
 from pathlib import Path
 
-METRIC_NAMES = ["faithfulness", "answer_relevancy", "context_recall", "context_precision"]
+RAGAS_METRICS = ["faithfulness", "answer_relevancy", "context_recall", "context_precision"]
 METRIC_CN = {
     "faithfulness": "忠实度（答案是否忠于检索片段）",
     "answer_relevancy": "答案相关性（是否切题）",
     "context_recall": "上下文召回（是否漏检）",
     "context_precision": "上下文精度（噪声多少）",
 }
+
+# 指标渲染顺序：先 RAGAS 4 项，再文档级 IR，最后片段级（弱标注）
+_IR_KINDS = ("hit_rate@1", "hit_rate@3", "precision@1", "precision@3", "precision@5",
+             "recall@1", "recall@3", "recall@5", "mrr", "ndcg@5")
+PREFERRED_ORDER = RAGAS_METRICS + [f"doc_{k}" for k in _IR_KINDS] + [f"chunk_{k}" for k in _IR_KINDS]
 
 # ★ 同名指标在两种口径下算法完全不同，必须逐条写清楚，否则只看表头必然误读
 CALIBER = {
@@ -49,7 +54,43 @@ CALIBER = {
         },
         "note": "需要裁判模型（见各报告的 judge_model）与 embedding 接口；分数受裁判模型影响，需固定裁判模型再比较。",
     },
+    "deterministic": {
+        "title": "确定性 IR 指标（**不需要 LLM 裁判**）",
+        "algo": {
+            "hit_rate": "top-k 里是否至少命中一个正例（0/1，对 k 个 query 取平均）",
+            "recall": "top-k 覆盖了正例集合的多大比例（注意：会被语料粒度污染，跨分块配置不可比）",
+            "precision": "top-k 里有多大比例是正例（噪声视角；与语料总片段数无关，可跨分块配置比较）",
+            "mrr": "第一个正例的排名倒数（1/rank），对「排得够不够前」最敏感",
+            "ndcg": "二元相关性的 nDCG@k；正例全部排在最前时为 1.0",
+        },
+        "note": "只测**检索排序质量**，不含生成质量。`doc_*` 为文档级主口径；"
+                "`chunk_*` 为片段级**弱标注**口径（自动生成，非人工标注，阈值见报告 caliber）。",
+    },
 }
+
+
+def metric_names_of(reports: list[dict]) -> list[str]:
+    """各报告出现过的指标名，按 PREFERRED_ORDER 排序（报告之间指标集可以不同）"""
+    present: set[str] = set()
+    for report in reports:
+        present.update((report.get("metrics") or {}).keys())
+    present.discard("n")
+    ordered = [name for name in PREFERRED_ORDER if name in present]
+    ordered += sorted(present - set(ordered))
+    return ordered
+
+
+def metric_label(name: str) -> str:
+    """指标显示名：RAGAS 4 项用固定中文名，IR 指标按 前缀+类型+k 动态生成"""
+    if name in METRIC_CN:
+        return METRIC_CN[name]
+    for prefix, level in (("doc_", "文档级"), ("chunk_", "片段级(弱标注)")):
+        if name.startswith(prefix):
+            kind, _, k = name[len(prefix):].partition("@")
+            kind_cn = {"hit_rate": "命中率", "recall": "召回率", "precision": "精度(噪声)",
+                       "mrr": "MRR", "ndcg": "nDCG"}.get(kind, kind)
+            return f"{level}{kind_cn}{'@' + k if k else ''}"
+    return name
 
 
 def load_report(path: str) -> dict:
@@ -132,13 +173,15 @@ def render(reports: list[dict], labels: list[str], worst: int = 0) -> str:
         header += " Δ(末-首) | 变化 |"
         separator += "---|---|"
     lines += [header, separator]
-    for name in METRIC_NAMES:
+    for name in metric_names_of(reports):
         values = [r.get("metrics", {}).get(name) for r in reports]
-        row = f"| {name}<br>{METRIC_CN[name]} | " + " | ".join(fmt(v) for v in values) + " |"
+        row = f"| {name}<br>{metric_label(name)} | " + " | ".join(fmt(v) for v in values) + " |"
         if len(reports) >= 2:
             diff, pct = delta_text(values[0], values[-1])
             row += f" {diff} | {pct} |"
         lines.append(row)
+    if reports and "n" in (reports[0].get("metrics") or {}):
+        lines.append(f"| n（样本数） | " + " | ".join(str(r.get("metrics", {}).get("n")) for r in reports) + " |")
     lines.append("")
 
     # ---- 指标口径说明（逐条写清 mock 与 real 下的真实算法）----
@@ -156,8 +199,24 @@ def render(reports: list[dict], labels: list[str], worst: int = 0) -> str:
             suffix = f"（裁判模型：{'、'.join(sorted(m for m in models if m))}）"
         lines += [f"**{'、'.join(group)} —— 口径：{caliber['title']}**{suffix}", "",
                   "| 指标 | 本口径下的实际算法 |", "|---|---|"]
-        for name in METRIC_NAMES:
-            lines.append(f"| {name} | {caliber['algo'][name]} |")
+        if judge == "deterministic":
+            # IR 指标：算法按"指标类型"说明；标注口径（文档级 / 片段级弱标注）逐份报告写明
+            for kind, text in caliber["algo"].items():
+                lines.append(f"| {kind} | {text} |")
+            lines.append("")
+            for label, report in zip(labels, reports):
+                report_meta = report.get("meta", {}) or {}
+                if report_meta.get("judge") != judge:
+                    continue
+                for key, info in (report_meta.get("caliber") or {}).items():
+                    extra = ""
+                    if key == "chunk" and info.get("threshold") is not None:
+                        extra = (f"；相似度阈值 {info['threshold']}，语料 {info.get('chunk_total')} 个片段，"
+                                 f"平均每 query {info.get('avg_positive_per_query')} 个正例")
+                    lines.append(f"- **{label} / `{key}_*`**：{info.get('text', '')}{extra}")
+        else:
+            for name in RAGAS_METRICS:
+                lines.append(f"| {name} | {caliber['algo'][name]} |")
         lines += ["", f"> {caliber['note']}", ""]
 
     if len(by_judge) > 1:
@@ -180,18 +239,21 @@ def render(reports: list[dict], labels: list[str], worst: int = 0) -> str:
             items = report.get("per_question", [])
             if not items:
                 continue
-            scored = []
-            for item in items:
-                values = [item.get(name) for name in METRIC_NAMES if item.get(name) is not None]
-                if values:
-                    scored.append((sum(values) / len(values), item))
-            scored.sort(key=lambda pair: pair[0])
-            lines += [f"## 低分样本（{label} 平均分最低 {min(worst, len(scored))} 条）", ""]
-            lines += ["| id | 问题 | 平均分 | 命中片段 | 忠实度 | 召回 |", "|---|---|---|---|---|---|"]
-            for avg, item in scored[:worst]:
-                lines.append(f"| {item.get('id')} | {item.get('question')} | {avg:.3f} | "
-                             f"{item.get('n_contexts')} | {fmt(item.get('faithfulness'))} | "
-                             f"{fmt(item.get('context_recall'))} |")
+            # 排序键优先用「文档级命中@1」（IR 报告）或 faithfulness（RAGAS 报告），都没有就退化为首个可用指标
+            sort_key = next((name for name in ("doc_hit@1", "faithfulness")
+                             if items[0].get(name) is not None),
+                            next((name for name in metric_names_of([report])
+                                  if items[0].get(name) is not None), None))
+            if sort_key is None:
+                continue
+            scored = sorted(items, key=lambda item: (item.get(sort_key) is None, item.get(sort_key)))
+            lines += [f"## 低分样本（{label} 按 {sort_key} 最低 {min(worst, len(scored))} 条）", ""]
+            lines += ["| id | 问题 | 命中片段 | 检索到的文档（按排名） | 命中@1 | MRR |",
+                      "|---|---|---|---|---|---|"]
+            for item in scored[:worst]:
+                ranked = " > ".join(item.get("ranked_docs") or []) or "（无）"
+                lines.append(f"| {item.get('id')} | {item.get('question')} | {item.get('n_contexts')} | "
+                             f"{ranked} | {fmt(item.get('doc_hit@1'))} | {fmt(item.get('doc_rr'))} |")
             lines.append("")
 
     return "\n".join(lines)

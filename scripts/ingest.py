@@ -95,7 +95,8 @@ def drop_collection(name: str) -> int:
     return count
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    """argv 留出参数位：evaluation/experiments.py 与 evaluation/run_ir.py 都以函数方式驱动入库"""
     parser = argparse.ArgumentParser(description="知识库入库（支持 txt / pdf，支持分块参数实验）")
     parser.add_argument("path", nargs="?", default=None, help="文件或目录，默认 assets/")
     parser.add_argument("--chunk-size", type=int, default=None, help="覆盖 config.chunk_size")
@@ -105,7 +106,7 @@ def main() -> int:
                         help="嵌入后端：dashscope 云端 / local 本地 bge-small-zh-v1.5（默认取 config）")
     parser.add_argument("--rebuild", action="store_true", help="先删除同名集合再重建（做实验时用）")
     parser.add_argument("--dry-run", action="store_true", help="只统计切分结果，不写库、不调 embedding")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     chunk_size = config.chunk_size if args.chunk_size is None else args.chunk_size
     chunk_overlap = config.chunk_overlap if args.chunk_overlap is None else args.chunk_overlap
