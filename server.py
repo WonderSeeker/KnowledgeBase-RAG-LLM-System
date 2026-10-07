@@ -34,6 +34,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from fastapi import FastAPI, HTTPException                     # noqa: E402
 from pydantic import BaseModel, Field                          # noqa: E402
 
+# ★ 显式导入：本模块会自己 new chromadb.Client（见 _chroma_count），
+#   必须在建客户端之前完成遥测 logger 屏蔽与持久化设置，不能依赖 import 链的巧合
+from chroma_quiet import CHROMA_SETTINGS                       # noqa: E402
 import config_data as config                                   # noqa: E402
 import embeddings as embeddings_module                         # noqa: E402
 

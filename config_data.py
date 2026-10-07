@@ -7,6 +7,7 @@
 2. 路径改为基于本文件位置的绝对路径。原来是 "./xxx" 相对当前工作目录，
    从不同目录启动会读写到不同的库（README 里的 Q1 就是这个坑）。
 """
+import os
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -56,7 +57,7 @@ rerank_model = "gte-rerank-v2"   # DashScope 重排模型（用 dashscope SDK �
 # ⚠️ 两个后端的向量维度不同，绝不可混用同一个 collection：
 #    代码会把「后端 + 模型 + 维度」写进 collection metadata，不一致直接报错退出。
 #    默认集合名也随之区分：dashscope -> rag，local -> rag_local
-embedding_backend = "dashscope"
+embedding_backend = os.environ.get("EMBEDDING_BACKEND", "dashscope")
 local_embedding_base_url = "http://127.0.0.1:11434"   # 启动：cd D:\Projects ; .\svc.ps1 start llm
 local_embedding_model = "bge-small-zh-v1.5"           # 实测 512 维、L2 归一化
 local_embedding_api_key = "dummy-not-used"            # 本地服务不校验密钥，占位即可

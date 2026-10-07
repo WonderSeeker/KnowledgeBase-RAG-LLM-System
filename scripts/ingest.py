@@ -32,6 +32,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# ★ 显式导入：本脚本会直接 new chromadb.Client（见 drop_collection），
+#   必须在建客户端之前完成遥测屏蔽与持久化设置，不能依赖 import 链的巧合
+from chroma_quiet import CHROMA_SETTINGS                                # noqa: E402
 import config_data as config                                            # noqa: E402
 import embeddings as embeddings_module                                  # noqa: E402
 from knowledge_base import KnowledgeBaseService, extract_text           # noqa: E402
@@ -82,12 +85,7 @@ def drop_collection(name: str) -> int:
     （日志里会多出一遍 [嵌入] 输出，容易让人以为重复入库了）。
     """
     import chromadb
-    from chromadb.config import Settings
-    client = chromadb.Client(Settings(
-        anonymized_telemetry=False,
-        is_persistent=True,
-        persist_directory=config.persist_directory,
-    ))
+    client = chromadb.Client(CHROMA_SETTINGS)
     try:
         collection = client.get_collection(name)
     except Exception:
