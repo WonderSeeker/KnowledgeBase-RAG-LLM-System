@@ -36,6 +36,7 @@ for _path in (str(EVAL_DIR), str(PROJECT_ROOT)):
         sys.path.insert(0, _path)
 
 import config_data as config                                    # noqa: E402
+import embeddings as embeddings_module                          # noqa: E402
 from dataset import EvalItem, load_eval_set, summarize          # noqa: E402
 
 RUNS_DIR = EVAL_DIR / "runs"
@@ -88,10 +89,13 @@ def build_offline_retriever(candidate_k: int):
     )
 
 
-def run_pipeline(items: list[EvalItem], mode: str, top_k: int, candidate_k: int) -> list[dict]:
+def run_pipeline(items: list[EvalItem], mode: str, top_k: int, candidate_k: int) -> tuple[list[dict], dict]:
     """对每条问题跑一次 RAG，收集 answer / contexts / 耗时
 
-    返回的 records 会先存成 jsonl，之后重新打分可以直接 --reuse，不必再跑模型。
+    返回 (records, run_env)：
+      - records 会先存成 jsonl，之后重新打分可以直接 --reuse，不必再跑模型；
+      - run_env 记录本次实际使用的「集合 + 嵌入后端 + 模型 + 维度」，
+        写进报告 meta —— 不同维度/后端的指标不可比较，必须可追溯。
     """
     # 必须在建检索器之前覆盖：检索器是在 RagService.__init__ / build_offline_retriever 里建的
     config.retrieve_k = top_k
@@ -121,7 +125,12 @@ def run_pipeline(items: list[EvalItem], mode: str, top_k: int, candidate_k: int)
                 "total_seconds": round(time.perf_counter() - start, 3),
             })
             print(f"  · {item.id} 命中 {len(contexts)} 段")
-        return records
+        return records, {
+            "collection": "（离线替身：未使用向量库）",
+            "embedding_backend": "（离线替身：无嵌入）",
+            "embedding_model": None,
+            "embedding_dim": None,
+        }
 
     if not os.environ.get("DASHSCOPE_API_KEY"):
         raise SystemExit(
@@ -150,7 +159,12 @@ def run_pipeline(items: list[EvalItem], mode: str, top_k: int, candidate_k: int)
         })
         print(f"  · [{i}/{len(items)}] {item.id} 命中 {result['n_contexts']} 段，"
               f"耗时 {result['total_seconds']}s")
-    return records
+    return records, {
+        "collection": rag.collection_name,
+        "embedding_backend": rag.profile.backend,
+        "embedding_model": rag.profile.model,
+        "embedding_dim": rag.embedding_dim,
+    }
 
 
 def load_records(path: Path) -> list[dict]:
@@ -179,12 +193,10 @@ def score_with_ragas(records: list[dict], judge_provider: str, judge_model: str)
         faithfulness,
     )
 
-    from langchain_community.embeddings import DashScopeEmbeddings
-
     judge_llm = build_judge_llm(judge_provider, judge_model)
-    judge_embeddings = LangchainEmbeddingsWrapper(
-        DashScopeEmbeddings(model=config.embedding_model_name)
-    )
+    # 裁判侧的 embedding 跟随本次运行的嵌入后端：
+    # local 时零成本、不消耗云端额度，且与检索侧保持同一向量空间，口径更一致
+    judge_embeddings = LangchainEmbeddingsWrapper(embeddings_module.build_embeddings())
 
     dataset = Dataset.from_dict({
         "question": [r["question"] for r in records],
@@ -269,6 +281,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="粗排候选数（混合检索与重排从这批候选里精选）")
     parser.add_argument("--collection", default=None,
                         help="检索哪个向量库集合（分块对比实验用，配合 scripts/ingest.py --collection）")
+    parser.add_argument("--embedding-backend", choices=["dashscope", "local"], default=None,
+                        help="嵌入后端：dashscope 云端 / local 本地 bge-small-zh-v1.5（默认取 config）")
     parser.add_argument("--chunk-size", type=int, default=None,
                         help="分块参数：离线模式真实生效；real 模式只用于记录（检索不切分，参数由入库时决定）")
     parser.add_argument("--chunk-overlap", type=int, default=None,
@@ -293,7 +307,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.rerank is not None:
         config.rerank_enabled = args.rerank
     if args.collection:
-        config.collection_name = args.collection
+        config.collection_override = args.collection   # 显式指定（分块实验用），不再按后端派生命名
+    if args.embedding_backend:
+        config.embedding_backend = args.embedding_backend
     if args.chunk_size is not None:
         config.chunk_size = args.chunk_size
     if args.chunk_overlap is not None:          # 0 是合法重叠度，所以用 is not None 判断
@@ -310,8 +326,10 @@ def main(argv: list[str] | None = None) -> int:
     started = time.perf_counter()
     print("=" * 78)
     print(f"[评测] 实验名={args.name} 模式={args.mode} 裁判={judge}")
-    print(f"[评测] 检索：策略={config.retrieval_method} 集合={config.collection_name} top_k={top_k} "
+    print(f"[评测] 检索：策略={config.retrieval_method} "
+          f"集合={embeddings_module.default_collection_name()} top_k={top_k} "
           f"候选={candidate_k} 重排={'开' if config.rerank_enabled else '关'}")
+    print(f"[评测] 嵌入：后端={config.embedding_backend}（真实维度在准备阶段实测）")
     print(f"[评测] 分块：{config.chunk_size}/{config.chunk_overlap}")
     print("=" * 78)
 
@@ -319,6 +337,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.reuse:
         reuse_path = Path(args.reuse)
         records = load_records(reuse_path)
+        # 复用明细时并不知道当时的嵌入环境，如实标注为"未知"而不是冒充已知
+        run_env = {"collection": "（复用明细：未知）", "embedding_backend": "（复用明细：未知）",
+                   "embedding_model": None, "embedding_dim": None}
         print(f"[评测] 复用已有结果：{reuse_path}（{len(records)} 条），跳过 RAG 链路")
     else:
         items = load_eval_set(Path(args.eval_set))
@@ -326,7 +347,7 @@ def main(argv: list[str] | None = None) -> int:
             items = items[:args.limit]
         print(summarize(items))
         print("-" * 78)
-        records = run_pipeline(items, args.mode, top_k, candidate_k)
+        records, run_env = run_pipeline(items, args.mode, top_k, candidate_k)
         run_path = RUNS_DIR / f"{args.name}_{args.mode}.jsonl"
         save_records(run_path, records)
         print(f"[评测] 运行明细已保存：{run_path}")
@@ -365,8 +386,11 @@ def main(argv: list[str] | None = None) -> int:
                 "rerank_model": config.rerank_model if config.rerank_enabled else None,
                 "chunk_size": config.chunk_size,
                 "chunk_overlap": config.chunk_overlap,
-                "max_spliter_char_number": config.max_spliter_char_number,
-                "collection": config.collection_name,
+                # 实际使用（run_env 来自真实的检索器对象，不是 config 推断）
+                "collection": run_env["collection"],
+                "embedding_backend": run_env["embedding_backend"],
+                "embedding_model": run_env["embedding_model"],
+                "embedding_dim": run_env["embedding_dim"],
             },
             "models": {
                 "embedding": config.embedding_model_name,

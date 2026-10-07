@@ -33,6 +33,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import config_data as config                                            # noqa: E402
+import embeddings as embeddings_module                                  # noqa: E402
 from knowledge_base import KnowledgeBaseService, extract_text           # noqa: E402
 from langchain_text_splitters import RecursiveCharacterTextSplitter     # noqa: E402
 
@@ -74,19 +75,44 @@ def dry_run(files: list[Path], chunk_size: int, chunk_overlap: int) -> int:
     return 0
 
 
+def drop_collection(name: str) -> int:
+    """删除集合，返回原有片段数。
+
+    直接用 chromadb 删，而不是"先构造入库服务再删"——后者会白跑一次嵌入维度探测
+    （日志里会多出一遍 [嵌入] 输出，容易让人以为重复入库了）。
+    """
+    import chromadb
+    from chromadb.config import Settings
+    client = chromadb.Client(Settings(
+        anonymized_telemetry=False,
+        is_persistent=True,
+        persist_directory=config.persist_directory,
+    ))
+    try:
+        collection = client.get_collection(name)
+    except Exception:
+        return 0
+    count = collection.count()
+    client.delete_collection(name)
+    return count
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="知识库入库（支持 txt / pdf，支持分块参数实验）")
     parser.add_argument("path", nargs="?", default=None, help="文件或目录，默认 assets/")
     parser.add_argument("--chunk-size", type=int, default=None, help="覆盖 config.chunk_size")
     parser.add_argument("--chunk-overlap", type=int, default=None, help="覆盖 config.chunk_overlap")
-    parser.add_argument("--collection", default=None, help="写入哪个集合，默认 config.collection_name")
+    parser.add_argument("--collection", default=None, help="写入哪个集合，默认按嵌入后端派生（rag / rag_local）")
+    parser.add_argument("--embedding-backend", choices=["dashscope", "local"], default=None,
+                        help="嵌入后端：dashscope 云端 / local 本地 bge-small-zh-v1.5（默认取 config）")
     parser.add_argument("--rebuild", action="store_true", help="先删除同名集合再重建（做实验时用）")
     parser.add_argument("--dry-run", action="store_true", help="只统计切分结果，不写库、不调 embedding")
     args = parser.parse_args()
 
     chunk_size = config.chunk_size if args.chunk_size is None else args.chunk_size
     chunk_overlap = config.chunk_overlap if args.chunk_overlap is None else args.chunk_overlap
-    collection = args.collection or config.collection_name
+    backend = args.embedding_backend or config.embedding_backend
+    collection = args.collection or embeddings_module.default_collection_name(backend)
 
     target = Path(args.path).resolve() if args.path else PROJECT_ROOT / "assets"
     if not target.exists():
@@ -102,23 +128,23 @@ def main() -> int:
         return dry_run(files, chunk_size, chunk_overlap)
 
     print(f"[入库] 目标：{target}")
-    print(f"[入库] 集合={collection} 分块={chunk_size}/{chunk_overlap} 待处理 {len(files)} 个文件")
-
-    service = KnowledgeBaseService(
-        chunk_size=chunk_size, chunk_overlap=chunk_overlap, collection_name=collection
-    )
+    print(f"[入库] 集合={collection} 嵌入后端={backend} "
+          f"分块={chunk_size}/{chunk_overlap} 待处理 {len(files)} 个文件")
 
     if args.rebuild:
-        before = service.chroma._collection.count()
-        service.chroma.delete_collection()          # 删掉旧集合，避免新旧分块混在一起
+        before = drop_collection(collection)        # 先删旧集合，避免新旧分块混在一起
         print(f"[重建] 已删除集合 {collection}（原 {before} 个片段）")
-        service = KnowledgeBaseService(
-            chunk_size=chunk_size, chunk_overlap=chunk_overlap, collection_name=collection
-        )
         # md5 记录是按内容去重的，重建集合后必须清掉，否则同内容会被判为"已入库"而跳过
-        if config.md5_path.exists():
-            Path(config.md5_path).unlink()
+        # 注意：config.md5_path 是 str（阶段 1 改成绝对路径时定的类型），不是 Path
+        md5_file = Path(config.md5_path)
+        if md5_file.exists():
+            md5_file.unlink()
             print("[重建] 已清空 md5.text 去重记录（否则重复内容不会被重新写入）")
+
+    service = KnowledgeBaseService(
+        chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+        collection_name=collection, embedding_backend=backend,
+    )
 
     success = 0
     for file_path in files:

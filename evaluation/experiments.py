@@ -37,6 +37,7 @@ for _path in (str(EVAL_DIR), str(PROJECT_ROOT), str(SCRIPTS_DIR)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
+import config_data as config                                      # noqa: E402
 import run_ragas                                                  # noqa: E402
 from ingest import main as ingest_main                            # noqa: E402
 from report import load_report, render                            # noqa: E402
@@ -72,13 +73,19 @@ def parse_methods(retrievers: str | None, single: str | None) -> list[str | None
     return [single]
 
 
-def ingest_collection(chunk_size: int, chunk_overlap: int) -> str:
-    """按分块参数入库到独立集合（同分块参数只入库一次，多个检索策略共用）"""
-    collection = f"rag_c{chunk_size}_o{chunk_overlap}"
+def collection_name_for(chunk_size: int, chunk_overlap: int, backend: str) -> str:
+    """集合名带上嵌入后端：从命名上就避免不同向量空间混用（指纹校验是第二道防线）"""
+    return f"rag_{backend}_c{chunk_size}_o{chunk_overlap}"
+
+
+def ingest_collection(chunk_size: int, chunk_overlap: int, backend: str) -> str:
+    """按「分块参数 + 嵌入后端」入库到独立集合（同组合只入库一次，多个检索策略共用）"""
+    collection = collection_name_for(chunk_size, chunk_overlap, backend)
     code = ingest_main([
         str(PROJECT_ROOT / "assets"),
         "--chunk-size", str(chunk_size),
         "--chunk-overlap", str(chunk_overlap),
+        "--embedding-backend", backend,
         "--collection", collection,
         "--rebuild",
     ])
@@ -88,10 +95,11 @@ def ingest_collection(chunk_size: int, chunk_overlap: int) -> str:
 
 
 def run_one(mode: str, name: str, chunk_size: int, chunk_overlap: int,
-            method: str | None, extra: list[str], ingested: set[tuple[int, int]]) -> Path | None:
+            method: str | None, extra: list[str], ingested: set[tuple],
+            backend: str) -> Path | None:
     """跑一组实验：real 模式先按分块参数入库，再评测"""
     suffix = f"_c{chunk_size}_o{chunk_overlap}" + (f"_{method}" if method else "")
-    run_name = f"{name}{suffix}"
+    run_name = f"{name}_{backend}{suffix}"
     out_path = REPORTS_DIR / f"report_{run_name}_{mode}.json"
 
     argv = [
@@ -99,6 +107,7 @@ def run_one(mode: str, name: str, chunk_size: int, chunk_overlap: int,
         "--name", run_name,
         "--chunk-size", str(chunk_size),
         "--chunk-overlap", str(chunk_overlap),
+        "--embedding-backend", backend,
         "--out", str(out_path),
         *extra,
     ]
@@ -108,11 +117,11 @@ def run_one(mode: str, name: str, chunk_size: int, chunk_overlap: int,
     if mode == "real":
         print(f"\n{'=' * 78}\n[实验] {run_name}：准备集合\n{'=' * 78}")
         try:
-            if (chunk_size, chunk_overlap) not in ingested:
-                collection = ingest_collection(chunk_size, chunk_overlap)
-                ingested.add((chunk_size, chunk_overlap))
+            if (chunk_size, chunk_overlap, backend) not in ingested:
+                collection = ingest_collection(chunk_size, chunk_overlap, backend)
+                ingested.add((chunk_size, chunk_overlap, backend))
             else:
-                collection = f"rag_c{chunk_size}_o{chunk_overlap}"
+                collection = collection_name_for(chunk_size, chunk_overlap, backend)
                 print(f"[实验] 集合 {collection} 本轮已入库过，直接复用")
         except RuntimeError as exc:
             print(f"[实验] {exc}，跳过 {run_name}")
@@ -140,6 +149,8 @@ def main() -> int:
                         help="只跑单一检索策略（等价于 --retrievers 写一个值）")
     parser.add_argument("--top-k", type=int, default=None,
                         help="交给大模型的片段数。⚠️ 对比 context_precision 时必须固定同一个 k")
+    parser.add_argument("--embedding-backend", choices=["dashscope", "local"], default=None,
+                        help="嵌入后端（默认取 config；local 指向本机 127.0.0.1:11434）")
     parser.add_argument("--candidate-k", type=int, default=None)
     parser.add_argument("--rerank", action="store_true", help="开启重排（仅 real 模式生效）")
     args = parser.parse_args()
@@ -155,7 +166,8 @@ def main() -> int:
     if args.rerank:
         extra += ["--rerank"]
 
-    print(f"[实验] 模式={mode_label(args.mode)}")
+    backend = args.embedding_backend or config.embedding_backend
+    print(f"[实验] 模式={mode_label(args.mode)} 嵌入后端={backend}")
     print(f"[实验] 分块维度：{'，'.join(f'{s}/{o}' for s, o in configs)}")
     print(f"[实验] 检索维度：{'，'.join(m or '（config 默认）' for m in methods)}")
     print(f"[实验] 附加参数：{' '.join(extra) if extra else '（用 config 默认值）'}")
@@ -171,7 +183,8 @@ def main() -> int:
     ingested: set[tuple[int, int]] = set()
     for chunk_size, chunk_overlap in configs:
         for method in methods:
-            path = run_one(args.mode, args.name, chunk_size, chunk_overlap, method, extra, ingested)
+            path = run_one(args.mode, args.name, chunk_size, chunk_overlap, method, extra,
+                           ingested, backend)
             if path:
                 reports.append(path)
 

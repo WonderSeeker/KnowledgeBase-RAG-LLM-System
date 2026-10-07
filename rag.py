@@ -16,7 +16,7 @@ from retrievers import (
     describe as describe_retriever,
     load_all_documents,
 )
-from langchain_community.embeddings import DashScopeEmbeddings
+import embeddings as embeddings_module
 import config_data as config
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_community.chat_models.tongyi import ChatTongyi
@@ -33,8 +33,21 @@ def print_prompt(prompt):
 class RagService(object):
     def __init__(self):
 
+        # 阶段 4：嵌入后端（dashscope 云端 / local 本地）。
+        # prepare() 会完成 local 探活 + 用一次真实调用实测维度（不用 /health 的 dim，冷启动时为 null）
+        self.profile, self.embeddings, self.embedding_dim = embeddings_module.prepare(
+            config.embedding_backend
+        )
+        self.collection_name = embeddings_module.default_collection_name(config.embedding_backend)
+
         self.vector_service = VectorStoreService(
-            embedding=DashScopeEmbeddings(model=config.embedding_model_name)
+            embedding=self.embeddings,
+            collection_name=self.collection_name,
+        )
+        # 指纹校验：检索时用的向量维度必须与集合里存的向量一致，否则报错退出
+        embeddings_module.verify_and_stamp(
+            self.vector_service.vector_store._collection,
+            self.profile, self.embedding_dim, self.collection_name,
         )
 
         # 阶段 3：检索策略由 config.retrieval_method 决定（vector / bm25 / hybrid）

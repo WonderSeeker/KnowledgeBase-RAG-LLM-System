@@ -70,6 +70,29 @@ def delta_text(before, after) -> tuple[str, str]:
     return f"{diff:+.4f}", pct
 
 
+def caliber_conflicts(reports: list[dict]) -> list[str]:
+    """找出各报告之间「口径不一致」的地方：k / 嵌入后端 / 嵌入维度
+
+    这三者任一不同，指标就没有可比性（尤其是嵌入维度不同 = 向量空间不同）。
+    把它抽成函数，让终端告警与 Markdown 告警用的是同一套判断。
+    """
+    metas = [(r.get("meta", {}) or {}).get("retrieval", {}) or {} for r in reports]
+    warnings: list[str] = []
+
+    top_ks = sorted({m.get("top_k") for m in metas} - {None})
+    if len(top_ks) > 1:
+        warnings.append(f"各报告 top_k 不同（{top_ks}）：检索片段数不同时 context_precision / "
+                        f"context_recall 不具直接可比性，请先对齐 k。")
+
+    backends = sorted({str(m.get("embedding_backend")) for m in metas
+                       if m.get("embedding_backend") is not None})
+    dims = sorted({m.get("embedding_dim") for m in metas if m.get("embedding_dim") is not None})
+    if len(backends) > 1 or len(dims) > 1:
+        warnings.append(f"嵌入口径不同（后端 {backends} / 维度 {dims}）：向量空间不同，"
+                        f"指标不可跨行比较。")
+    return warnings
+
+
 def describe(report: dict) -> str:
     meta = report.get("meta", {})
     retrieval = meta.get("retrieval", {})
@@ -97,12 +120,9 @@ def render(reports: list[dict], labels: list[str], worst: int = 0) -> str:
         # 只用纯文本标记：Windows 控制台是 GBK，emoji 会让 print 抛 UnicodeEncodeError
         lines += ["", f"> **[警告]** {warnings[0]}"]
 
-    # 口径校验：k 不同就没有可比性，必须显式警告（context_precision 随 k 增大天然下降）
-    top_ks = sorted({(r.get("meta", {}) or {}).get("retrieval", {}).get("top_k") for r in reports} - {None})
-    if len(top_ks) > 1:
-        lines += ["", f"> **[警告] 口径不一致**：各报告的 top_k 不同（{top_ks}）。"
-                      f"检索片段数不同，context_precision / context_recall 不具直接可比性，"
-                      f"请先把 k 对齐再下结论。"]
+    # 口径校验：k / 嵌入后端 / 维度不一致就没有可比性，必须显式警告
+    for conflict in caliber_conflicts(reports):
+        lines += ["", f"> **[警告] 口径不一致**：{conflict}"]
 
     # ---- 指标表（支持 1 份 / 2 份 / N 份：N 份时以第一份为基准算 Δ）----
     lines += ["", "## 指标对比", ""]
@@ -199,10 +219,8 @@ def main() -> int:
     if "mock" in modes or "heuristic" in judges:
         print("[警告] 含 MOCK/启发式数据：打分不是 RAGAS，只用于验证流程，不能当作真实效果。\n")
 
-    top_ks = sorted({(r.get("meta", {}) or {}).get("retrieval", {}).get("top_k") for r in reports} - {None})
-    if len(top_ks) > 1:
-        print(f"[警告] 口径不一致：各报告 top_k = {top_ks}。"
-              f"检索片段数不同时 context_precision 不可横向比较，请先对齐 k。\n")
+    for conflict in caliber_conflicts(reports):
+        print(f"[警告] 口径不一致：{conflict}\n")
 
     text = render(reports, labels, worst=args.worst)
     print(text)

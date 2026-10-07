@@ -35,6 +35,7 @@ from fastapi import FastAPI, HTTPException                     # noqa: E402
 from pydantic import BaseModel, Field                          # noqa: E402
 
 import config_data as config                                   # noqa: E402
+import embeddings as embeddings_module                         # noqa: E402
 
 API_VERSION = "0.1.0"
 
@@ -64,7 +65,9 @@ def _chroma_count() -> int | None:
             # （直接 new 一个 Settings 会绕过那边的处理，/health 又会被 telemetry 报错刷屏）
             from vector_stores import CHROMA_SETTINGS
             _chroma_client = chromadb.Client(CHROMA_SETTINGS)
-        return _chroma_client.get_or_create_collection(config.collection_name).count()
+        return _chroma_client.get_or_create_collection(
+            embeddings_module.default_collection_name()
+        ).count()
     except Exception as exc:                      # noqa: BLE001
         print(f"[api] 读取向量库片段数失败（不影响 /health）：{exc}")
         return None
@@ -90,7 +93,7 @@ def _retrieval_config() -> dict:
         "rrf_k": config.rrf_k if config.retrieval_method == "hybrid" else None,
         "rerank": config.rerank_enabled,
         "rerank_model": config.rerank_model if config.rerank_enabled else None,
-        "collection": config.collection_name,
+        "collection": embeddings_module.default_collection_name(),
     }
 
 
@@ -98,6 +101,21 @@ def _chunking_config() -> dict:
     return {
         "chunk_size": config.chunk_size,
         "chunk_overlap": config.chunk_overlap,
+    }
+
+
+def _models_config() -> dict:
+    """⚠️ expected_dim 是**配置声明的期望值**，不是实测值。
+
+    真实维度要发起一次嵌入调用才知道（本地服务冷启动时 /health 的 dim 是 null），
+    所以这里不敢冒充实测结果；实际使用中的维度以检索时打印的 `[嵌入] … 实测维度=N` 为准。
+    """
+    profile = embeddings_module.resolve_profile()
+    return {
+        "embedding": profile.model,
+        "chat": config.chat_model_name,
+        "embedding_backend": profile.backend,
+        "embedding_expected_dim": profile.expected_dim,
     }
 
 
@@ -160,11 +178,11 @@ def health() -> HealthResponse:
         status="ok" if not reasons else "degraded",
         reasons=reasons,
         api_key_configured=_api_key_present(),
-        collection=config.collection_name,
+        collection=embeddings_module.default_collection_name(),
         documents=documents,
         retrieval=_retrieval_config(),
         chunking=_chunking_config(),
-        models={"embedding": config.embedding_model_name, "chat": config.chat_model_name},
+        models=_models_config(),
         version=API_VERSION,
     )
 
@@ -175,7 +193,7 @@ def get_config() -> dict:
     return {
         "retrieval": _retrieval_config(),
         "chunking": _chunking_config(),
-        "models": {"embedding": config.embedding_model_name, "chat": config.chat_model_name},
+        "models": _models_config(),
         "paths": {
             "persist_directory": config.persist_directory,
             "md5_path": config.md5_path,
@@ -188,9 +206,14 @@ def get_config() -> dict:
 def chat(request: ChatRequest) -> ChatResponse:
     """检索增强问答。缺 Key / 语料为空 -> 503；上游调用失败 -> 502"""
     if not _api_key_present():
+        if config.embedding_backend == "local":
+            message = ("未配置 DASHSCOPE_API_KEY：嵌入已切到本地服务，"
+                       "但**生成模型仍走通义千问**，所以问答依然需要 Key。")
+        else:
+            message = "未配置 DASHSCOPE_API_KEY，无法调用通义千问的嵌入与生成接口。"
         raise _not_ready(
             "api_key_missing",
-            "未配置 DASHSCOPE_API_KEY，无法调用通义千问的嵌入与生成接口。",
+            message,
             f"把 Key 填进 {PROJECT_ROOT / '.env'}，然后 .\\svc.ps1 restart kbapi",
         )
     if _chroma_count() == 0:

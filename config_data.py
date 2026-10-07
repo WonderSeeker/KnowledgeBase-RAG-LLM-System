@@ -18,7 +18,8 @@ load_dotenv(BASE_DIR / ".env")
 md5_path = str(BASE_DIR / "md5.text")
 
 # Chroma
-collection_name="rag"
+collection_name="rag"          # 集合名基名；实际名字按嵌入后端派生（dashscope -> rag，local -> rag_local）
+collection_override = None     # 显式指定集合名时优先（分块对比实验用），为 None 则自动派生
 persist_directory=str(BASE_DIR / "chroma_db")
 
 # spliter
@@ -48,6 +49,17 @@ candidate_k = 10              # 粗排候选数：混合检索与重排都从这
 rrf_k = 60                    # RRF 融合常数（经验值 60：越大越强调"两路检索都靠前"）
 rerank_enabled = False        # 是否开启重排
 rerank_model = "gte-rerank-v2"   # DashScope 重排模型（用 dashscope SDK 的 TextReRank 调用）
+
+# ---------------- 阶段 4 补充：嵌入后端 ----------------
+# dashscope 云端 / local 本地 OpenAI 兼容服务
+# 默认保持 dashscope，现有行为不变。
+# ⚠️ 两个后端的向量维度不同，绝不可混用同一个 collection：
+#    代码会把「后端 + 模型 + 维度」写进 collection metadata，不一致直接报错退出。
+#    默认集合名也随之区分：dashscope -> rag，local -> rag_local
+embedding_backend = "dashscope"
+local_embedding_base_url = "http://127.0.0.1:11434"   # 启动：cd D:\Projects ; .\svc.ps1 start llm
+local_embedding_model = "bge-small-zh-v1.5"           # 实测 512 维、L2 归一化
+local_embedding_api_key = "dummy-not-used"            # 本地服务不校验密钥，占位即可
 
 embedding_model_name="text-embedding-v4"
 chat_model_name="qwen3-max"
