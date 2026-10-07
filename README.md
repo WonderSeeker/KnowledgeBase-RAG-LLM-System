@@ -9,7 +9,8 @@
 **已完成并验证**（本仓库可复现的证据）：
 
 - 检索层：向量 / BM25 / RRF 混合 / 重排，统一 `invoke()` 契约 —— 8 项探针通过（CHANGES §6.1）
-- 修复 3 个真实缺陷（含一个使问答链路完全不可用的 ImportError）（CHANGES §2.1 / §4.8 / §5.2）
+- 修复 4 个上游缺陷（含一个使问答链路完全不可用的 ImportError，以及两个**静默型**缺陷），
+  并定位修掉 1 处自己在改造中引入的静默回归（CHANGES §2.1 / §4.8 / §5.2 / §5.7）
 - 2 个机制性护栏：评测口径不一致拦截、遥测治理（CHANGES §4.3 / §5.3）
 - FastAPI 服务（`/health` + `/chat`），缺 Key 时返回明确错误而非 500（CHANGES §5.1）
 
@@ -32,6 +33,18 @@
 3. **能对外服务**：FastAPI 暴露 `/health` 与 `/chat`，并统一用 `svc.ps1` 管理启停。
 
 同时修掉了 3 个真实缺陷，其中一个是**使问答链路完全不可用**的 `ImportError`（见下文第 6 节）。
+
+### 效果示例
+
+<div align="left">
+  <img src="./assets/chat_demo1.png" width="760" alt="Streamlit 问答页：基于知识库尺码表作答，并说明该问题超出参考文档覆盖范围">
+</div>
+
+问「我的体重 990 公斤，按照参考文档推荐尺码」时，模型**没有编造尺码**，而是引用知识库里的尺码表
+（最大 5XL / 190cm 以上 / 210 斤以上），并明确指出该问题已超出参考文档的覆盖范围 ——
+这正是 RAG 该有的行为：有据可依，且知道自己不知道。
+
+> 截图为原项目 demo，本项目的问答页流程与示例语料一致（仅额外增加了一行耗时显示）。
 
 ---
 
@@ -106,6 +119,13 @@ DASHSCOPE_API_KEY=sk-xxxxxxxx
 
 Key 申请：<https://dashscope.console.aliyun.com/apiKey>。`.env` 已在 `.gitignore` 中排除，不会被提交。
 
+> **可选：把嵌入切到本地（零成本）。** 默认嵌入走 DashScope 云端；若本机有 OpenAI 兼容的嵌入服务
+> （`http://127.0.0.1:11434`，模型 `bge-small-zh-v1.5` / 512 维，用 `.\svc.ps1 start llm` 启动），
+> 可切到本地：入库用 `scripts\ingest.py --embedding-backend local --rebuild`，评测侧加同样的参数。
+> 两个后端的**向量维度不同，绝不能共用同一个集合** —— 默认已按后端隔离为 `rag` / `rag_local`，
+> 且代码会把「后端 + 模型 + 实测维度」写进集合元数据，不一致直接报错退出。
+> 注意：**生成模型仍走通义千问，所以 `/chat` 依然需要 Key**。
+
 ### 2. 启停服务
 
 ```powershell
@@ -169,12 +189,22 @@ curl.exe -s -X POST http://127.0.0.1:8020/chat -H "Content-Type: application/jso
 | `documents` | 向量库里的片段数；`null` 表示读取失败（不影响进程状态） |
 | `retrieval` | 当前检索配置：`method` / `top_k` / `candidate_k` / `rrf_k` / `rerank` / `rerank_model` / `collection` |
 | `chunking` | `chunk_size` / `chunk_overlap` |
-| `models` | `embedding` / `chat` 模型名 |
+| `models` | `embedding` / `chat` 模型名，以及 `embedding_backend` / `embedding_expected_dim`（后者是配置声明的期望值；实测维度要在首次真实调用后才确定，不在 `/health` 里冒充） |
+| `version` | 接口版本 |
+
+### `GET /config`
+
+| 字段 | 含义 |
+|---|---|
+| `retrieval` | 与 `/health.retrieval` 同结构（`method` / `top_k` / `candidate_k` / `rrf_k` / `rerank` / `rerank_model` / `collection`） |
+| `chunking` | `chunk_size` / `chunk_overlap` |
+| `models` | 同 `/health.models`（含 `embedding_backend` / `embedding_expected_dim`） |
+| `paths` | `persist_directory`（向量库目录）/ `md5_path`（入库去重记录） |
 | `version` | 接口版本 |
 
 ### `POST /chat`
 
-请求：`{"question": "...", "session_id": "..."}`（`question` 必填，长度 1~2000；`session_id` 用于多轮历史，默认 `api_user`）
+请求：`{"question": "...", "session_id": "..."}`（`question` 必填，长度 1~2000；`session_id` 用于多轮历史，默认 `api_user`，最长 64）
 
 响应：`answer`、`contexts`（命中的片段原文，便于核对依据）、`n_contexts`、`session_id`、
 `retrieve_seconds`、`generate_seconds`、`total_seconds`、`retrieval`（本次实际使用的检索配置）。
@@ -204,8 +234,15 @@ curl.exe -s -X POST http://127.0.0.1:8020/chat -H "Content-Type: application/jso
 | `langchain-core` 0.1.53 不导出 `RunnableWithMessageHistory` | **问答链路完全不可用**：`import rag` 直接 `ImportError`，`RagService` 无法构造 | 项目自声明的依赖范围 `>=0.1.52,<0.2.0` 内就会解析到 0.1.53，在该范围内**必然发生**，属版本适配缺陷 |
 | `chunk_size` 对短文档失效（`max_spliter_char_number` 硬门槛） | 短文档只切出 1 个片段，检索退化为"全文匹配" | 客观对照：`chunk_size=150` 下片段数 **1 → 2**（CHANGES §4.8） |
 
-另有一个配置层缺陷：`.env` 从未被加载（依赖里装了 `python-dotenv` 却没有任何一处 `load_dotenv()`），
-导致按文档配置 `.env` 的用户拿不到 Key —— 见 `CHANGES.md` §2.1。
+另外 3 个（详细定位与证据见 `CHANGES.md` §2.1 / §5.7）：
+
+- **`.env` 从未被加载**：依赖里装了 `python-dotenv`，但全项目 `load_dotenv()` 调用数为 0 ——
+  按文档配置 `.env` 的用户拿不到 Key。
+- **`metadatas` 拼成 `metadata`（静默型）**：LangChain 的参数名是复数，写单数会落进 `**kwargs` 被静默忽略，
+  导致**所有片段元数据丢失**（实测 6/6 为 `None`），来源归因与文档级指标都不可能。
+- **Chroma 持久化被关掉（静默型回归，我在改造中引入的）**：为关遥测传入了 `client_settings`，
+  使 langchain 不再补 `is_persistent=True`，退化成**进程内内存库** ——
+  入库进程自测 100% 通过，只有跨进程才暴露（CHANGES §5.7 有修复前后的对照输出）。
 
 > 本节的缺陷清单只讲事实，不含任何效果数字。
 

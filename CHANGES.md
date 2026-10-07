@@ -526,8 +526,14 @@ INFO:     Uvicorn running on http://127.0.0.1:8020 (Press CTRL+C to quit)
 }
 ```
 
-**三个必须避开的坑**
+**四个必须避开的坑**
 
+0. **探活与调用的根路径不同**（实施时实测踩到）：本地服务暴露两个根
+   —— 探活用 `GET {base}/health`（顶层，**不带** `/v1`），
+   调用用 `POST {base}/v1/embeddings`（**带** `/v1`）。
+   OpenAI 客户端会在 `base_url` 后拼 `/embeddings`，所以给它的必须是带 `/v1` 的地址；
+   写成裸 base 会得到 `404 {'detail': 'Not Found'}`（错误信息很含糊，容易误判成"服务没起"）。
+   代码见 `embeddings.api_base_url()`。
 1. **`embedding.dim` 在模型未加载时是 `null`**（上面实测就是 `null`），要等第一次嵌入调用之后才变成 512。
    → **不要**用它做 collection 维度校验，用下面的常量表（确定性、无副作用），
    再在第一次嵌入调用之后用真实向量长度复核一次，不一致就抛错。
@@ -569,6 +575,91 @@ def preflight_local():
 **复用现有机制**：报告 meta 需同时记录 `k / collection / 嵌入后端 / 维度`，
 并把 5.1 里那条「k 不一致就拦截」扩展为「k、嵌入后端、维度任一不一致就拦截」。
 
+### 5.7 接入真实嵌入（local 后端）+ 两个新发现的缺陷
+
+#### 实现
+
+| 内容 | 说明 |
+|---|---|
+| `embeddings.py`（新） | 嵌入后端 profile：解析 → local 探活 → **实测真实维度** → collection 指纹校验 |
+| `config_data.py` | 新增 `embedding_backend`（默认 `dashscope`，现有行为不变）、`local_embedding_*`、`collection_override` |
+| CLI 开关 | `scripts/ingest.py` / `evaluation/run_ragas.py` / `evaluation/experiments.py` 均新增 `--embedding-backend dashscope\|local` |
+| 集合隔离 | 默认名按后端派生：`dashscope → rag`、`local → rag_local`；显式 `--collection` 可覆盖 |
+| 指纹护栏 | 把「后端 + 模型 + 实测维度」写进 collection metadata，不一致**直接报错退出**（含可操作的换集合命令） |
+| 报告 meta | `retrieval` 记录实际 `collection` / `embedding_backend` / `embedding_model` / `embedding_dim`；`report.py` 的拦截条件从「k 不一致」扩展为「k、后端、维度任一不一致」 |
+
+#### ★ 新缺陷 1（上游遗留，**静默型**）：`metadatas` 拼成 `metadata`，元数据全部丢失
+
+**证据**：入库 6 个片段后，逐个读回 metadata —— **6/6 全是 `None`**。
+
+**根因**：LangChain 的签名是 `add_texts(texts, metadatas=None, ...)`（**复数**），
+原项目写成 `metadata=`（单数），落进 `**kwargs` 被**静默忽略**。
+
+**影响**：不知道片段来自哪个文档；`format_document` 拼给大模型的是空元数据；
+**文档级归因（IR 指标、分块实验的按文档统计）完全做不了**。
+
+**为什么不是偶发**：`**kwargs` 吞掉拼错的参数名是 LangChain 的既有行为，
+任何环境、任何版本都必然发生，且**不报错、不告警**。
+
+**修复**：改用 `metadatas=`，并顺带补上 `chunk_index`（便于定位命中的是文件里第几段）。
+修复后实测：`{'chunk_index': 0, 'create_time': '2026-10-07 22:18:33', 'operator': '客户', 'source': '尺码推荐.txt'}`
+
+#### ★ 新缺陷 2（**我在阶段 3 引入的回归**，同样是静默型）：Chroma 退化成进程内内存库
+
+**现象**：入库进程自己 `count()` 得到 6 个片段，但**换一个进程** `get_collection('rag_local')`
+直接 `ValueError: Collection rag_local does not exist.` —— 数据根本没落盘。
+
+**根因**：`langchain_chroma.Chroma` 只有在**不传** `client_settings` 时才会自己构造
+`Settings(is_persistent=True, persist_directory=...)`；一旦传入 `client_settings` 就照用不误、
+**不会补 `is_persistent`**。而 chromadb 的 `Settings` 默认 `is_persistent=False`。
+阶段 3 我为了关掉遥测报错传入了 `client_settings`，把这个默认值弄丢了 → 退化成内存库。
+
+**症状为什么极隐蔽**：进程内自测（入库后立刻 count、同一进程检索）**100% 通过**，
+只有「入库一个进程、检索另一个进程」的跨进程验证才会暴露 ——
+而 `/health` 之前一直显示 `documents: 0`，我原以为是"语料还没入库"，其实是磁盘库与写入库不是同一个。
+
+**修复**：`CHROMA_SETTINGS` 显式加上 `is_persistent=True, persist_directory=...`。
+
+**证据（修复前 vs 修复后，同一命令、新进程读取）**：
+
+```
+修复前：磁盘上的集合 = ['rag']            ← rag_local 不在，6 个片段只存在于内存
+        ValueError: Collection rag_local does not exist.
+修复后：磁盘上的集合 = ['rag', 'rag_local']
+        rag_local 片段数 = 6
+        嵌入指纹 = {'embedding_backend': 'local', 'embedding_dim': 512, 'embedding_model': 'bge-small-zh-v1.5'}
+```
+
+#### 首次真实向量检索验证（local / 512 维 / 6 片段）
+
+（`--embedding-backend local --rebuild` 入库，跨进程读取，`similarity_search_with_score` 打分）
+
+| 问题 | 期望文档 | 向量 top3（`HIT` = 命中期望文档） |
+|---|---|---|
+| 怎样穿显得更瘦？ | 颜色推荐.txt | **HIT 0.9275 颜色推荐** / HIT 0.9619 颜色推荐 / 1.0377 洗涤养护 |
+| 身高168cm、体重100斤，建议穿什么尺码？ | 尺码推荐.txt | **HIT 0.5018 尺码推荐** / 1.0797 颜色推荐 / 1.0961 颜色推荐 |
+| 真丝连衣裙应该怎么洗？ | 洗涤养护.txt | **HIT 0.8194 洗涤养护** / HIT 0.8325 洗涤养护 / HIT 0.9087 洗涤养护 |
+
+同一组问题用 BM25 的 top1 对比：
+
+| 问题 | 向量 top1 | BM25 top1 |
+|---|---|---|
+| 怎样穿显得更瘦？ | 颜色推荐.txt（命中） | **无（0 命中）** |
+| 身高168cm、体重100斤，建议穿什么尺码？ | 尺码推荐.txt | 尺码推荐.txt |
+| 真丝连衣裙应该怎么洗？ | 洗涤养护.txt | 洗涤养护.txt |
+
+**这一步真正结束了一个悬案**：4.5 第 2 条曾猜测「语义改写是字面检索的死角，只有真向量能救」，
+当时只是推测（离线替身里两路都是字面检索）；现在用**真嵌入 + 真语料**复现了它 ——
+`怎样穿显得更瘦？` 向量能命中、BM25 直接 0 命中。
+
+#### 现在哪些结论有效了（对应第六节的更新）
+
+- ✅ **新有效**：「真向量检索能解决字面检索的语义死角」—— 单样本级证据，可复现（上表）。
+- ✅ **新有效**：元数据归因可用（修复缺陷 1 之后），这是 IR 指标的前置条件。
+- ⚠️ **仍不够**：上表只有 **3 个问题**，n=3 不构成统计结论；
+  必须把 29 条评测集全跑一遍 + 上确定性 IR 指标，才能下"hybrid 优于纯 BM25"这类判断（第 4 步）。
+- ⚠️ **仍无效**：RAGAS 4 指标的真实数值（需要 LLM judge）；分块参数对比。
+
 ---
 
 ## 六、结论有效性划定（写 README / 简历 / 汇报前必读）
@@ -587,9 +678,13 @@ def preflight_local():
 | 4 | 机制性护栏之一：k 不一致拦截 | 机制存在且实测触发 | 4.3 结尾：k=1 vs k=4 对比时终端与 Markdown 均输出口径警告 |
 | 5 | 机制性护栏之二：遥测治理 | 机制存在且实测生效 | 5.3：`_logs\kbapi.err` 已无 `Failed to send telemetry event` |
 | 6 | ★ 致命 ImportError 的定位与修复 | **客观事实**：修复前 `import rag` 直接失败 | 5.2：修复前 ImportError 原文 + 修复后三策略构造成功 |
+| 7 | 修复 2 个**静默型**缺陷：`metadatas` 拼写错误、Chroma 持久化回归 | **客观事实**：前者修复前 6/6 片段 metadata 为 `None`；后者修复前跨进程找不到集合 | 5.7：修复前后对照 + 跨进程读取证据 |
+| 8 | 嵌入后端可切换且有护栏（`dashscope` / `local`） | 机制存在且实测：探活失败、后端不一致、维度不一致三种情况均按预期拦截与提示 | 5.6 / 5.7：护栏实测输出 |
+| 9 | 真向量检索能命中字面检索完全漏掉的样本（**能力验证**，非效果结论） | 单样本级、可复现 | 5.7：`怎样穿显得更瘦？` 向量 top1 = 颜色推荐.txt，BM25 = 0 命中 |
 
-这 6 条的共同点：**结论不依赖「检索或打分是否正确」，只依赖代码、统计与机制事实。**
+这 9 条的共同点：**结论不依赖「检索或打分是否正确」，只依赖代码、统计与机制事实。**
 换任何嵌入后端、任何语料，这些结论都成立。
+（第 9 条是"能力验证"——证明系统能做到，不证明整体效果变好；后者要等第 4 步 IR 指标。）
 
 ### 6.2 暂无效结论（必须等真实嵌入复测，**绝对不要进 README 结论区**）
 
@@ -610,7 +705,10 @@ def preflight_local():
    + 至少一种不依赖 LLM judge 的确定性指标（Hit Rate@k / MRR / Recall@k / nDCG@k），
    产出后才可以写进 README 的结论区。
 5. 复测时还需按「嵌入后端 + 维度」隔离 collection（不同维度绝不能混用），
-   并把这两个字段写进报告 meta，沿用已有的「口径不一致就拦截」机制。
+   并把这两个字段写进报告 meta，沿用已有的「口径不一致就拦截」机制。**这一条已于 5.7 实现。**
+6. **真嵌入已接入，但上面两张表仍无效**：5.7 的验证只跑了 **3 个问题**（n=3），
+   属于"能力验证"而非统计结论。4.3 / 4.4 两张表要重跑全 29 条 + 确定性 IR 指标才算数。
+   ★ 特别提醒：**不要**看到 5.7 的表就以为 4.3 / 4.4 也被"救活"了 —— 它们的检索与打分仍是替身。
 
 ### 6.3 用词红线
 
