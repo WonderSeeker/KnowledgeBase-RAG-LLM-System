@@ -203,13 +203,17 @@ def main() -> int:
     parser.add_argument("--sim-threshold", type=float, default=0.6,
                         help="片段级弱标注的相似度阈值；填 0 关闭片段级口径")
     parser.add_argument("--eval-set", default=str(EVAL_DIR / "eval_set.jsonl"))
+    parser.add_argument("--corpus", default=None,
+                        help="语料目录（默认 assets；扩语料后用 corpus，集合名会自动带 _corpus 标记）")
     parser.add_argument("--limit", type=int, default=None, help="只跑前 N 条，调试用")
     parser.add_argument("--no-ingest", action="store_true", help="跳过入库（复用已有集合）")
     args = parser.parse_args()
 
-    from experiments import parse_configs, parse_methods
+    from experiments import parse_configs, parse_methods, corpus_tag_of
     configs = parse_configs(args.configs)
     methods = parse_methods(args.retrievers, args.retriever)
+    corpus_dir = Path(args.corpus).resolve() if args.corpus else None
+    corpus_tag = corpus_tag_of(corpus_dir)
     backend = args.embedding_backend or config.embedding_backend
     config.embedding_backend = backend
     top_k = args.top_k if args.top_k is not None else config.retrieve_k
@@ -223,6 +227,7 @@ def main() -> int:
     print(f"[IR] 实验名={args.name} 嵌入后端={backend} top_k={top_k} 候选={candidate_k}")
     print(f"[IR] 分块维度：{'，'.join(f'{s}/{o}' for s, o in configs)}")
     print(f"[IR] 检索维度：{'，'.join(m or '（默认）' for m in methods)}")
+    print(f"[IR] 语料目录：{corpus_dir or 'assets（默认）'}  集合标记：{corpus_tag or '（无）'}")
     print(f"[IR] 片段级弱标注阈值：{args.sim_threshold}（0 = 关闭）")
     print(summarize(items), sep="\n")
     print("=" * 78)
@@ -232,10 +237,10 @@ def main() -> int:
     ingested: set[tuple] = set()
 
     for chunk_size, chunk_overlap in configs:
-        collection = collection_name_for(chunk_size, chunk_overlap, backend)
+        collection = collection_name_for(chunk_size, chunk_overlap, backend, corpus_tag)
         if not args.no_ingest and (chunk_size, chunk_overlap, backend) not in ingested:
             print(f"\n[IR] 入库到集合 {collection}（分块 {chunk_size}/{chunk_overlap}）")
-            ingest_collection(chunk_size, chunk_overlap, backend)
+            ingest_collection(chunk_size, chunk_overlap, backend, corpus_dir)
             ingested.add((chunk_size, chunk_overlap, backend))
 
         for method in methods:

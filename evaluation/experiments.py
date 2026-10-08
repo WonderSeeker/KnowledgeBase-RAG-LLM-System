@@ -73,16 +73,29 @@ def parse_methods(retrievers: str | None, single: str | None) -> list[str | None
     return [single]
 
 
-def collection_name_for(chunk_size: int, chunk_overlap: int, backend: str) -> str:
-    """集合名带上嵌入后端：从命名上就避免不同向量空间混用（指纹校验是第二道防线）"""
-    return f"rag_{backend}_c{chunk_size}_o{chunk_overlap}"
+def collection_name_for(chunk_size: int, chunk_overlap: int, backend: str,
+                        corpus_tag: str = "") -> str:
+    """集合名带上嵌入后端与语料标记：从命名上就避免不同向量空间/不同语料混用
+
+    （指纹校验是第二道防线 —— 它只能发现嵌入不一致，发现不了语料换了）
+    """
+    return f"rag_{backend}{corpus_tag}_c{chunk_size}_o{chunk_overlap}"
 
 
-def ingest_collection(chunk_size: int, chunk_overlap: int, backend: str) -> str:
-    """按「分块参数 + 嵌入后端」入库到独立集合（同组合只入库一次，多个检索策略共用）"""
-    collection = collection_name_for(chunk_size, chunk_overlap, backend)
+def corpus_tag_of(corpus_dir: Path | None) -> str:
+    """语料目录 → 集合名标记：assets 空标记，其它目录用目录名（如 corpus → _corpus）"""
+    if corpus_dir is None or corpus_dir.name == "assets":
+        return ""
+    return f"_{corpus_dir.name}"
+
+
+def ingest_collection(chunk_size: int, chunk_overlap: int, backend: str,
+                      corpus_dir: Path | None = None) -> str:
+    """按「语料 + 分块参数 + 嵌入后端」入库到独立集合"""
+    source_dir = corpus_dir or (PROJECT_ROOT / "assets")
+    collection = collection_name_for(chunk_size, chunk_overlap, backend, corpus_tag_of(source_dir))
     code = ingest_main([
-        str(PROJECT_ROOT / "assets"),
+        str(source_dir),
         "--chunk-size", str(chunk_size),
         "--chunk-overlap", str(chunk_overlap),
         "--embedding-backend", backend,
