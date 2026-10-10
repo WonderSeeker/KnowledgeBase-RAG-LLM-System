@@ -34,6 +34,9 @@ class EvalItem:
     source: str                      # 标准答案出自哪个语料文件
     tags: list[str] = field(default_factory=list)   # 问题类型标签，便于分难度看指标
     relevant_sources: list[str] = field(default_factory=list)   # 应命中的文档（1~2 个）；留空则回退到 source
+    # 答案关键词：既用于出题时的程序化校验（答案确实在来源文档里），
+    # 也用于 IR 评测的「对抗性口径」——片段命中关键词即算相关（纯词面、不涉及嵌入）
+    answer_keywords: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -47,6 +50,7 @@ class EvalItem:
             source=data.get("source", ""),
             tags=list(data.get("tags") or []),
             relevant_sources=list(data.get("relevant_sources") or []),
+            answer_keywords=list(data.get("answer_keywords") or []),
         )
 
     @property

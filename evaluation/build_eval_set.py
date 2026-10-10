@@ -281,6 +281,8 @@ def check(items: list[dict]) -> tuple[list[dict], list[str]]:
             # ★ tags / 题型一律以**实测**为准（作者意图只作留痕，见 question_type_authored）
             "tags": [measured_type],
             "relevant_sources": [item["source"]],
+            # 保留关键词：IR 评测的「对抗性口径」要用它判定片段相关性（纯词面，不涉及嵌入）
+            "answer_keywords": item["answer_keywords"],
             "question_type": measured_type,
             "question_type_authored": item["tags"][0],
             "question_source_overlap": round(ratio, 4),

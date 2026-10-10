@@ -28,8 +28,13 @@ METRIC_CN = {
 
 # 指标渲染顺序：先 RAGAS 4 项，再文档级 IR，最后片段级（弱标注）
 _IR_KINDS = ("hit_rate@1", "hit_rate@3", "precision@1", "precision@3", "precision@5",
+             "lift@1", "lift@3", "lift@5",
              "recall@1", "recall@3", "recall@5", "mrr", "ndcg@5")
-PREFERRED_ORDER = RAGAS_METRICS + [f"doc_{k}" for k in _IR_KINDS] + [f"chunk_{k}" for k in _IR_KINDS]
+# 顺序即"可信度递降"：文档级（非循环） → 对抗性口径（刻意偏袒关键词检索） → 弱标注（与向量检索同源）
+PREFERRED_ORDER = (RAGAS_METRICS
+                   + [f"doc_{k}" for k in _IR_KINDS]
+                   + [f"kw_{k}" for k in _IR_KINDS]
+                   + [f"chunk_{k}" for k in _IR_KINDS])
 
 # ★ 同名指标在两种口径下算法完全不同，必须逐条写清楚，否则只看表头必然误读
 CALIBER = {
@@ -84,11 +89,11 @@ def metric_label(name: str) -> str:
     """指标显示名：RAGAS 4 项用固定中文名，IR 指标按 前缀+类型+k 动态生成"""
     if name in METRIC_CN:
         return METRIC_CN[name]
-    for prefix, level in (("doc_", "文档级"), ("chunk_", "片段级(弱标注)")):
+    for prefix, level in (("doc_", "文档级"), ("kw_", "对抗口径"), ("chunk_", "片段级(弱标注)")):
         if name.startswith(prefix):
             kind, _, k = name[len(prefix):].partition("@")
             kind_cn = {"hit_rate": "命中率", "recall": "召回率", "precision": "精度(噪声)",
-                       "mrr": "MRR", "ndcg": "nDCG"}.get(kind, kind)
+                       "lift": "lift(相对基准率)", "mrr": "MRR", "ndcg": "nDCG"}.get(kind, kind)
             return f"{level}{kind_cn}{'@' + k if k else ''}"
     return name
 
@@ -131,6 +136,18 @@ def caliber_conflicts(reports: list[dict]) -> list[str]:
     if len(backends) > 1 or len(dims) > 1:
         warnings.append(f"嵌入口径不同（后端 {backends} / 维度 {dims}）：向量空间不同，"
                         f"指标不可跨行比较。")
+
+    # 检索口径也可能是"看不见的变量"：同一 k 下 candidate_k 不同，粗排池大小就不同，
+    # 混合检索/重排的结果会跟着变（实测同一配置 candidate_k=32 -> doc_hit@1 0.7222、=10 -> 0.6111）
+    candidate_ks = sorted({m.get("candidate_k") for m in metas if m.get("candidate_k") is not None})
+    if len(candidate_ks) > 1:
+        warnings.append(f"各报告 candidate_k 不同（{candidate_ks}）：粗排候选池大小不同，"
+                        f"会影响检索结果，比较前请先对齐。")
+
+    reranks = sorted({bool(m.get("rerank")) for m in metas})
+    if len(reranks) > 1:
+        warnings.append(f"各报告的重排开关不同（{[('开' if r else '关') for r in reranks]}）："
+                        f"重排会改变排序，比较前请先对齐。")
     return warnings
 
 

@@ -95,25 +95,25 @@ def build_retriever_for(method: str, collection: str, top_k: int, candidate_k: i
     return retriever, run_env
 
 
-def build_weak_labels(collection: str, profile, embeddings, items: list[EvalItem],
-                      threshold: float) -> tuple[list[set[str]], dict]:
+def load_chunks(collection: str):
+    """一次性读出集合里全部片段的 id / 文本 / 向量（两种片段级口径共用）"""
+    client = chromadb.Client(CHROMA_SETTINGS)
+    raw = client.get_collection(collection).get(include=["documents", "metadatas", "embeddings"])
+    chunk_ids: list[str] = []
+    for meta in raw["metadatas"]:
+        source = (meta or {}).get("source", "?")
+        index = (meta or {}).get("chunk_index", "?")
+        chunk_ids.append(f"{source}#{index}")
+    return chunk_ids, list(raw["documents"]), [list(v) for v in raw["embeddings"]]
+
+
+def build_weak_labels(items: list[EvalItem], embeddings, threshold: float,
+                      chunk_ids: list[str], chunk_vectors: list[list[float]]) -> tuple[list[set[str]], dict]:
     """片段级**弱标注**：正例 = 与标准答案嵌入相似度 ≥ 阈值的片段
 
     向量的取法：直接读 Chroma 里已存的向量（不再重复调用嵌入），只对 ground_truth 做嵌入。
     """
-    client = chromadb.Client(CHROMA_SETTINGS)
-    raw = client.get_collection(collection).get(include=["documents", "metadatas", "embeddings"])
-
-    chunk_ids: list[str] = []
-    chunk_vectors: list[list[float]] = []
-    for text, meta, vector in zip(raw["documents"], raw["metadatas"], raw["embeddings"]):
-        source = (meta or {}).get("source", "?")
-        index = (meta or {}).get("chunk_index", "?")
-        chunk_ids.append(f"{source}#{index}")
-        chunk_vectors.append(list(vector))
-
-    truths = [item.ground_truth for item in items]
-    truth_vectors = embeddings.embed_documents(truths)
+    truth_vectors = embeddings.embed_documents([item.ground_truth for item in items])
 
     relevants: list[set[str]] = []
     density: list[int] = []
@@ -133,6 +133,45 @@ def build_weak_labels(collection: str, profile, embeddings, items: list[EvalItem
         "avg_positive_per_query": round(sum(density) / len(density), 2) if density else 0.0,
         "note": ("片段级弱标注：正例 = 与标准答案嵌入相似度 ≥ 阈值的片段，"
                  "自动生成、非人工标注；阈值是口径的一部分。"),
+    }
+    return relevants, stats
+
+
+def build_keyword_labels(items: list[EvalItem], chunk_ids: list[str],
+                         chunk_texts: list[str]) -> tuple[list[set[str]], dict]:
+    """片段级**对抗性口径**：正例 = 片段文本里出现了该问题的 answer_keywords（纯词面匹配）
+
+    ★ 这个口径是刻意设计成"对向量检索不利"的：
+      关键词是字面匹配，所以 BM25 这类词面检索天然占优；向量检索召回的往往是
+      "语义相近但用词不同"的片段，在这个口径下会被判成不相关。
+      它的价值在于**换个方向施压**：
+        - 若向量检索在此口径下仍然胜出 → 结论比弱标注口径下硬得多；
+        - 若名次反转 → 说明弱标注口径下的优势确实来自"标注生成器与向量检索同源"的循环性。
+      两种结果都有信息量，这也是为什么两个口径要一起给。
+    """
+    relevants: list[set[str]] = []
+    density: list[int] = []
+    no_positive: list[str] = []
+    for item in items:
+        keywords = [kw for kw in item.answer_keywords if kw]
+        positive = set()
+        if keywords:
+            for chunk_id, text in zip(chunk_ids, chunk_texts):
+                if any(kw in text for kw in keywords):
+                    positive.add(chunk_id)
+        if not positive:
+            # 关键词一个都没命中的情况必须显式记下来：该 query 的指标会恒为 0，
+            # 如果这种样本变多，说明评测集关键词与语料脱节了（是数据问题，不是检索问题）
+            no_positive.append(item.id)
+        relevants.append(positive)
+        density.append(len(positive))
+
+    stats = {
+        "chunk_total": len(chunk_ids),
+        "avg_positive_per_query": round(sum(density) / len(density), 2) if density else 0.0,
+        "items_without_positive": no_positive,
+        "note": ("片段级对抗性口径：正例 = 片段包含该问题的 answer_keywords（纯词面），"
+                 "刻意偏袒关键词检索；若向量检索在此口径下仍胜出，结论更硬。"),
     }
     return relevants, stats
 
@@ -175,17 +214,38 @@ def evaluate_one(items: list[EvalItem], method: str, collection: str, top_k: int
     doc_relevants = [set(item.relevant_docs) for item in items]
     metrics = ir_metrics.evaluate_rankings(doc_rankings, doc_relevants, K_VALUES, prefix="doc")
 
-    caliber = {"doc": {"label_level": "文档级", "text": ir_metrics.caliber_text("doc")}}
-    chunk_stats = None
+    chunk_ids, chunk_texts, chunk_vectors = load_chunks(collection)
+    corpus_size = len(chunk_ids)
+    caliber: dict = {
+        "doc": {"label_level": "文档级", "chunk_total": corpus_size,
+                "text": ir_metrics.caliber_text("doc")},
+    }
+
+    # 片段级口径一：弱标注（嵌入相似度）—— 与向量检索同源，存在循环性；lift 只解决跨分组可比
     if threshold > 0:
-        profile, embeddings, _ = embeddings_module.prepare(config.embedding_backend)
-        chunk_relevants, chunk_stats = build_weak_labels(collection, profile, embeddings, items, threshold)
+        _profile, embeddings, _dim = embeddings_module.prepare(config.embedding_backend)
+        chunk_relevants, chunk_stats = build_weak_labels(
+            items, embeddings, threshold, chunk_ids, chunk_vectors
+        )
         metrics.update(ir_metrics.evaluate_rankings(chunk_rankings, chunk_relevants, K_VALUES, prefix="chunk"))
-        caliber["chunk"] = {"label_level": "片段级（弱标注）", "text": ir_metrics.caliber_text("chunk"),
-                            **chunk_stats}
+        base = ir_metrics.base_rate(chunk_relevants, corpus_size)
+        ir_metrics.add_lift(metrics, "chunk", base)
+        caliber["chunk"] = {"label_level": "片段级（弱标注）", "base_rate": round(base, 4),
+                            "text": ir_metrics.caliber_text("chunk"), **chunk_stats}
         for record, relevant in zip(per_question, chunk_relevants):
             record["label_level"] = "chunk(weak)"
             record["chunk_relevant_n"] = len(relevant)
+
+    # 片段级口径二：对抗性口径（答案关键词词面命中）—— 刻意偏袒关键词检索，用来反向施压
+    kw_relevants, kw_stats = build_keyword_labels(items, chunk_ids, chunk_texts)
+    if kw_stats["avg_positive_per_query"] > 0:
+        metrics.update(ir_metrics.evaluate_rankings(chunk_rankings, kw_relevants, K_VALUES, prefix="kw"))
+        kw_base = ir_metrics.base_rate(kw_relevants, corpus_size)
+        ir_metrics.add_lift(metrics, "kw", kw_base)
+        caliber["kw"] = {"label_level": "片段级（对抗性口径）", "base_rate": round(kw_base, 4),
+                         "text": ir_metrics.caliber_text("kw"), **kw_stats}
+        for record, relevant in zip(per_question, kw_relevants):
+            record["kw_relevant_n"] = len(relevant)
 
     run_env["elapsed_seconds"] = round(time.perf_counter() - started, 2)
     return metrics, per_question, run_env, caliber
@@ -200,8 +260,14 @@ def main() -> int:
     parser.add_argument("--top-k", type=int, default=None, help="交给下游的片段数（对比时必须固定）")
     parser.add_argument("--candidate-k", type=int, default=None, help="粗排候选数")
     parser.add_argument("--embedding-backend", choices=["dashscope", "local"], default=None)
+    # ★ 不要收紧这个阈值（默认 0.6 是刻意保留的，不是"没调好"）
+    #   收紧的收益：基准率下降 → lift 的区分度上升；
+    #   收紧的代价：留下来的正例恰好是嵌入模型最"自信"的那批 → 与标注生成器同源更强 → 循环性加重。
+    #   而"比检索器"时三路的基准率本来就完全相同（同一配置、同一套标注），
+    #   收紧只能加重循环性、换不到任何可比性收益 —— 只付代价、无收益。
+    #   跨分块配置的可比性问题由 lift = precision@k / 基准率 解决（见 ir_metrics.add_lift）。
     parser.add_argument("--sim-threshold", type=float, default=0.6,
-                        help="片段级弱标注的相似度阈值；填 0 关闭片段级口径")
+                        help="片段级弱标注的相似度阈值；填 0 关闭该口径。★ 不建议收紧，理由见代码注释")
     parser.add_argument("--eval-set", default=str(EVAL_DIR / "eval_set.jsonl"))
     parser.add_argument("--corpus", default=None,
                         help="语料目录（默认 assets；扩语料后用 corpus，集合名会自动带 _corpus 标记）")

@@ -109,11 +109,49 @@ def evaluate_rankings(rankings: list[list[str]], relevants: list[set[str]],
     return {name: round(value, 4) for name, value in metrics.items()}
 
 
+def base_rate(relevants: list[set[str]], corpus_size: int) -> float:
+    """基准率：随机从语料里取一个片段，它恰好是正例的概率
+
+    = 平均正例数 / 语料片段总数。
+
+    ★ 为什么必须把它算出来并公开展示：
+      `precision@k` 的**下界就是这个基准率**。不同分块配置下，基准率会随粒度漂移
+      （实测：150/15 是 9.0%、1000/100 是 15.1%，相差 1.7 倍），
+      于是"precision 变高"里有多少来自检索变好、有多少只是基准率涨了，无法区分。
+      把基准率一并输出，才能暴露这个混淆。
+    """
+    if not relevants or corpus_size <= 0:
+        return 0.0
+    return (sum(len(r) for r in relevants) / len(relevants)) / corpus_size
+
+
+def add_lift(metrics: dict, prefix: str, base: float,
+             k_values: tuple[int, ...] = DEFAULT_K_VALUES) -> dict:
+    """把 precision@k 归一化成 lift@k = precision@k / 基准率
+
+    lift 的含义：比"随机取一个片段"的相关概率高多少倍。
+
+    ★ 它解决什么、不解决什么（别指望它超出这个范围）：
+      - 解决：**跨分组（跨分块配置）的可比性**。基准率不同的两组，lift 可以横向比。
+      - 不解决：**标注本身的循环性**。片段级正例是用嵌入相似度定义的，
+        因此在某个检索器与标注生成器同源时，lift 仍会偏向它。
+        循环性只能靠"换一种与嵌入无关的标注"来对抗（见 caliber_text("kw")）。
+    """
+    if base <= 0:
+        return metrics
+    for k in k_values:
+        key = f"{prefix}_precision@{k}"
+        if key in metrics:
+            metrics[f"{prefix}_lift@{k}"] = round(metrics[key] / base, 3)
+    return metrics
+
+
 def metric_names(k_values: tuple[int, ...] = DEFAULT_K_VALUES, prefix: str = "") -> list[str]:
     """指标名顺序（供报告统一渲染）"""
     tag = f"{prefix}_" if prefix else ""
     names = [f"{tag}hit_rate@{k}" for k in k_values] + [f"{tag}recall@{k}" for k in k_values]
     names += [f"{tag}precision@{k}" for k in k_values]
+    names += [f"{tag}lift@{k}" for k in k_values]
     names += [f"{tag}mrr", f"{tag}ndcg@{max(k_values)}"]
     return names
 
@@ -137,6 +175,12 @@ def caliber_text(label_level: str) -> str:
     """口径说明文本（写进报告，避免只看表头误读）"""
     if label_level == "doc":
         return ("文档级标注：每个 query 的正例 = 评测集的 source 字段（应命中的 .txt）。"
-                "规则确定、可复现；局限是语料只有 3 份文档，跨文档问答会被低估。")
-    return ("片段级**弱标注**：正例 = 与标准答案嵌入相似度超过阈值的片段。"
-            "★ 这是自动生成的弱标注，不是人工标注，解读时请按弱标注对待。")
+                "规则确定、可复现；局限是文档数少时指标容易饱和。")
+    if label_level == "kw":
+        return ("片段级**对抗性口径**：正例 = 片段文本里出现了该问题的 answer_keywords（纯词面匹配）。"
+                "★ 这个口径**系统性偏袒 BM25 这类关键词检索**、对向量检索不利 —— 这是故意的："
+                "若向量检索在此口径下仍然胜出，结论就比弱标注口径硬；若反转，则说明"
+                "弱标注口径下的优势确实来自'标注生成器与向量检索同源'的循环性。两种结果都有信息量。")
+    return ("片段级**弱标注**：正例 = 与标准答案嵌入相似度 ≥ 阈值的片段。"
+            "★ 这是自动生成的弱标注，不是人工标注；且它由嵌入模型生成，"
+            "与该口径下的向量检索**同源**，存在循环性（详见报告的口径说明）。")
