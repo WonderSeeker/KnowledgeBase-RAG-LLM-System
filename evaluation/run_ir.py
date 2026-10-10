@@ -22,12 +22,22 @@
     # 4.4 分块参数对比（固定检索策略与 k）
     .\\.venv\\Scripts\\python.exe evaluation\\run_ir.py --name ir_chunk ^
         --configs 150/15,300/30,600/60,1000/100 --retriever hybrid --top-k 4 --candidate-k 32
+
+噪声地板（★ 下结论前必读）：
+    向量腿跨进程**不可复现** —— chromadb 走 HNSW 近似检索，索引图在进程内重建，
+    实测 36 题里有 24 题的**候选集合**跨进程就不同（不只是顺序）。
+    因此同一配置在不同进程会给出不同的指标（实测 doc_hit@1 抖动 2 题 / 36）。
+    → 用 `--repeat N` 起 N 个**独立进程**重复测量：报告取均值，并写入实测极差
+      （`meta.noise_floor`），对比表会自动把落在噪声内的行标成"无法排序"。
+    → 注意同进程内重复是**测不出**这个噪声的（实测同进程 0/36 差异），所以必须起独立进程。
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import math
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -251,6 +261,140 @@ def evaluate_one(items: list[EvalItem], method: str, collection: str, top_k: int
     return metrics, per_question, run_env, caliber
 
 
+# headline 噪声地板只看这些"下结论时真正会引用的主指标"（详见 merge_reports 里的说明）
+PRIMARY_NOISE_METRICS = ("doc_hit_rate@1", "doc_mrr", "kw_precision@3", "chunk_precision@3")
+
+
+def merge_reports(paths: list[Path], merged_name: str) -> Path:
+    """把 N 份重复报告合并成一份：指标取均值，并写入实测极差（该配置的噪声地板）
+
+    ★ 噪声地板是**每个配置各自的属性**，不是全局常数：
+      候选 10 时近并列的候选集较小、候选 32 时更大，地板可能不同。
+      所以这里对每个配置分别测量、分别记录，不做任何跨配置复用。
+    """
+    runs = [json.loads(p.read_text(encoding="utf-8")) for p in paths]
+    n = len(runs)
+    means: dict[str, float | None] = {}
+    spreads: dict[str, float] = {}
+    for name in runs[0]["metrics"]:
+        vals = [float(r["metrics"][name]) for r in runs if r["metrics"].get(name) is not None]
+        means[name] = round(sum(vals) / len(vals), 4) if vals else None
+        spreads[name] = round(max(vals) - min(vals), 4) if len(vals) > 1 else 0.0
+
+    eval_size = runs[0]["meta"]["eval_size"]
+    # ★ 不能对所有指标取极差的最大值当统一地板：lift 的量纲是 4~8、hit_rate 是 0~1，
+    #   混在一起算会得到"11.5 题"这种荒唐数（冒烟实测踩到过）。
+    #   对外的 headline 只取"下结论时真正引用的主指标"，逐指标极差放 by_metric 供对比表按行取用。
+    present = [spreads[m] for m in PRIMARY_NOISE_METRICS if m in spreads]
+    headline = max(present) if present else (max(spreads.values()) if spreads else 0.0)
+
+    merged = dict(runs[0])
+    merged["meta"] = dict(runs[0]["meta"])
+    merged["meta"]["name"] = merged_name
+    merged["meta"]["repeat_n"] = n
+    merged["meta"]["repeat_runs"] = [r["meta"]["name"] for r in runs]
+    merged["meta"]["noise_floor"] = {
+        "value": headline,                                  # 主指标口径（0~1 尺度）
+        "items": round(headline * eval_size, 1),            # 换算成"题数"，可操作单位
+        "eval_size": eval_size,
+        "headline_metrics": [m for m in PRIMARY_NOISE_METRICS if m in spreads],
+        "max_by_metric": max(spreads.values()) if spreads else 0.0,
+        "by_metric": spreads,                               # 逐指标极差：对比表按行取用
+        "note": ("同一配置 N 个独立进程实测极差。向量腿为 HNSW 近似检索，"
+                 "候选集合跨进程会变（实测 36 题里 24 题的集合不同），故存在此下界。"
+                 "对比表按 by_metric 逐行判断：|差值| 不超过该指标地板的一律标注为无法排序。"
+                 f"headline 只取主指标 {list(PRIMARY_NOISE_METRICS)} 里的最大值。"),
+    }
+    merged["meta"]["per_question_note"] = (
+        f"per_question 取自第 1 次运行（共 {n} 次，各次排名可能略有差异）"
+    )
+    merged["meta"]["warning"] = (
+        f"IR 指标（确定性，非 RAGAS）：测检索排序质量，不含生成质量。"
+        f"doc_* 文档级（无循环）/ kw_* 对抗口径（无嵌入）/ chunk_* 弱标注（嵌入同源）。"
+        f"本报告为 {n} 个独立进程的均值，实测噪声地板 {headline:.4f}"
+        f"（{round(headline * eval_size, 1)} 题 / {eval_size}）。"
+    )
+    merged["metrics"] = means
+
+    out = REPORTS_DIR / f"report_{merged_name}_ir.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[IR] 合并 {n} 次 -> {out.name}"
+          f"（主指标噪声地板 {headline:.4f} = {round(headline * eval_size, 1)} 题 / {eval_size}；"
+          f"任一指标最大极差 {max(spreads.values()) if spreads else 0.0:.4f}）")
+    return out
+
+
+def run_repeats(args, configs, methods, backend: str, top_k: int, candidate_k: int) -> list[Path]:
+    """起 N 个**独立进程**重复跑同一批配置，返回合并后的报告路径
+
+    为什么必须是独立进程（subprocess 而不是 multiprocessing / 循环调用）：
+        噪声来自 chromadb 的 HNSW 近似检索，索引图在**每个进程里重建**，
+        于是"近似并列"的候选**集合**都会变。同一个进程内重复跑是测不出来的
+        —— 实测同进程两次 0/36 题差异，跨进程 24/36 题集合不同。
+        subprocess 也与我们手工测量噪声时的方式完全一致（可复现）。
+    """
+    n = args.repeat
+    print(f"[IR] 重复测量：{n} 个独立进程（指标取均值，同时记录实测噪声地板）")
+    for i in range(1, n + 1):
+        cmd = [sys.executable, str(Path(__file__).resolve()),
+               "--name", f"{args.name}_r{i}",
+               "--configs", args.configs,
+               "--top-k", str(top_k),
+               "--candidate-k", str(candidate_k),
+               "--embedding-backend", backend,
+               "--sim-threshold", str(args.sim_threshold),
+               "--eval-set", args.eval_set,
+               "--repeat", "1"]
+        if args.retrievers:
+            cmd += ["--retrievers", args.retrievers]
+        if args.retriever:
+            cmd += ["--retriever", args.retriever]
+        if args.corpus:
+            cmd += ["--corpus", args.corpus]
+        if args.limit:
+            cmd += ["--limit", str(args.limit)]
+        if args.no_ingest or i > 1:
+            cmd.append("--no-ingest")           # 第 1 个进程负责入库，其余复用同一集合
+        print(f"\n[IR] --- 第 {i}/{n} 次（独立进程）---")
+        proc = subprocess.run(cmd, check=False)
+        if proc.returncode != 0:
+            print(f"[IR] 第 {i} 次运行失败（退出码 {proc.returncode}），中止重复测量")
+            return []
+
+    merged: list[Path] = []
+    for chunk_size, chunk_overlap in configs:
+        for method in methods:
+            suffix = f"_{method}" if method else ""
+            tail = f"{backend}_c{chunk_size}_o{chunk_overlap}{suffix}"
+            paths = [REPORTS_DIR / f"report_{args.name}_r{i}_{tail}_ir.json" for i in range(1, n + 1)]
+            missing = [p.name for p in paths if not p.exists()]
+            if missing:
+                print(f"[IR] 缺少重复报告，跳过该组合并：{missing}")
+                continue
+            merged.append(merge_reports(paths, f"{args.name}_{tail}"))
+    return merged
+
+
+def finalize(reports: list[Path], name: str, backend: str, started: float) -> int:
+    """渲染对比表并打印（单次与重复测量两条路径共用）"""
+    if not reports:
+        print("[IR] 没有任何成功的实验组")
+        return 1
+
+    loaded = [json.loads(Path(p).read_text(encoding="utf-8")) for p in reports]
+    labels = [r["meta"]["name"] for r in loaded]
+    text = render(loaded, labels, worst=0)
+    compare_path = REPORTS_DIR / f"{name}_{backend}_ir_compare.md"
+    compare_path.write_text(text, encoding="utf-8")
+
+    print(f"\n{'=' * 78}")
+    print(text)
+    print(f"[IR] 共 {len(reports)} 组，总耗时 {time.perf_counter() - started:.1f}s")
+    print(f"[IR] 对比表已写入：{compare_path}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="IR 指标评测（确定性，不需要 LLM 裁判）")
     parser.add_argument("--name", default="ir", help="实验名前缀")
@@ -273,6 +417,9 @@ def main() -> int:
                         help="语料目录（默认 assets；扩语料后用 corpus，集合名会自动带 _corpus 标记）")
     parser.add_argument("--limit", type=int, default=None, help="只跑前 N 条，调试用")
     parser.add_argument("--no-ingest", action="store_true", help="跳过入库（复用已有集合）")
+    # ★ 默认 3 次：单次运行的指标会被噪声地板（实测 2 题 / 36）淹没，见模块 docstring
+    parser.add_argument("--repeat", type=int, default=3,
+                        help="起 N 个独立进程重复测量，报告取均值并记录该配置的噪声地板（默认 3；1 = 不重复）")
     args = parser.parse_args()
 
     from experiments import parse_configs, parse_methods, corpus_tag_of
@@ -300,6 +447,14 @@ def main() -> int:
 
     reports: list[Path] = []
     started = time.perf_counter()
+
+    # 重复测量走独立进程（父进程只负责编排与合并），与手工测量噪声的方式一致
+    if args.repeat > 1:
+        return finalize(
+            run_repeats(args, configs, methods, backend, top_k, candidate_k),
+            args.name, backend, started,
+        )
+
     ingested: set[tuple] = set()
 
     for chunk_size, chunk_overlap in configs:
@@ -344,8 +499,10 @@ def main() -> int:
                     "avg_query_seconds": round(
                         sum(r["seconds"] for r in per_question) / len(per_question), 4),
                     "run_seconds": run_env["elapsed_seconds"],
+                    "repeat_n": 1,          # 单次运行：无法给出该配置的噪声地板，对比时不做"无法排序"标注
                     "warning": ("IR 指标（确定性，非 RAGAS）：测的是检索排序质量，不含生成质量。"
-                                "chunk_* 前缀为片段级弱标注口径。"),
+                                "doc_* 文档级（无循环）/ kw_* 对抗口径（无嵌入）/ chunk_* 弱标注（嵌入同源）。"
+                                "单次运行未测噪声地板，结论前请用 --repeat 3。"),
                 },
                 "metrics": metrics,
                 "per_question": per_question,
@@ -366,7 +523,6 @@ def main() -> int:
         print("[IR] 没有任何成功的实验组")
         return 1
 
-    import json
     loaded = [json.loads(Path(p).read_text(encoding="utf-8")) for p in reports]
     labels = [r["meta"]["name"] for r in loaded]
     text = render(loaded, labels, worst=0)

@@ -164,7 +164,47 @@ def describe(report: dict) -> str:
         detail += f" 重排={retrieval.get('rerank_model')}"
     return (f"{meta.get('name')} | 模式={meta.get('mode')} 裁判={meta.get('judge')} | {detail}"
             f" | 语料分块={retrieval.get('chunk_size')}/{retrieval.get('chunk_overlap')}"
+            f"{repeat_text(report)}"
             f" | {meta.get('generated_at')}")
+
+
+def noise_floor_of(reports: list[dict], metric_name: str) -> tuple[float | None, float | None]:
+    """本次对比中该指标可接受的"噪声地板"：各报告实测极差里的最大值
+
+    逐指标优先用报告的 `noise_floor.by_metric`（同一配置重复测出的**该指标**极差）；
+    没有该指标的细分数据时退回该报告的总体极差 —— 保守选择：宁可把差异判成噪声，
+    也不要凭空宣称发现。
+    返回 (地板值, 换算成题数)；参与对比的报告都没测过噪声地板时返回 (None, None)。
+    """
+    floors: list[tuple[float, float | None]] = []
+    for report in reports:
+        nf = (report.get("meta", {}) or {}).get("noise_floor") or {}
+        if not nf:
+            continue
+        eval_size = nf.get("eval_size")
+        by_metric = nf.get("by_metric") or {}
+        value = by_metric.get(metric_name)
+        if value is None:
+            value = nf.get("value")
+        if value is None:
+            continue
+        items = round(float(value) * eval_size, 1) if eval_size else None
+        floors.append((float(value), items))
+    if not floors:
+        return None, None
+    return max(floors, key=lambda pair: pair[0])
+
+
+def repeat_text(report: dict) -> str:
+    """重复测量的显示文本：`×3 次均值（噪声地板 2 题 / 36）`"""
+    meta = report.get("meta", {}) or {}
+    n = meta.get("repeat_n")
+    if not n or int(n) <= 1:
+        return ""
+    nf = meta.get("noise_floor") or {}
+    if nf:
+        return f" ×{n} 次均值（实测噪声地板 {nf.get('items')} 题 / {nf.get('eval_size')}）"
+    return f" ×{n} 次均值"
 
 
 def render(reports: list[dict], labels: list[str], worst: int = 0) -> str:
@@ -190,16 +230,49 @@ def render(reports: list[dict], labels: list[str], worst: int = 0) -> str:
         header += " Δ(末-首) | 变化 |"
         separator += "---|---|"
     lines += [header, separator]
+    noise_rows: list[tuple[str, float, float, float | None]] = []
     for name in metric_names_of(reports):
         values = [r.get("metrics", {}).get(name) for r in reports]
         row = f"| {name}<br>{metric_label(name)} | " + " | ".join(fmt(v) for v in values) + " |"
         if len(reports) >= 2:
             diff, pct = delta_text(values[0], values[-1])
-            row += f" {diff} | {pct} |"
+            mark = ""
+            floor, floor_items = noise_floor_of(reports, name)
+            numbers = [float(v) for v in values if v is not None]
+            if floor is not None and len(numbers) >= 2:
+                # ★ 自动拦截：Δ 列只有"末-首"一列，但三列之间有 3 对比较。
+                #   所以按**本行最宽的一对**（max-min）判断：连最宽的一对都被噪声盖住，
+                #   这一行就无法排序；否则说明行内至少有一对是可分的（哪怕首末那对不可分）。
+                widest = max(numbers) - min(numbers)
+                head_delta = abs(numbers[-1] - numbers[0])
+                if widest <= floor:
+                    mark = " **[本行最宽差异也在噪声内，无法排序]**"
+                    noise_rows.append((name, widest, floor, floor_items, "widest"))
+                elif head_delta <= floor:
+                    mark = " **[首末差异在噪声内]**"
+                    noise_rows.append((name, head_delta, floor, floor_items, "head"))
+            row += f" {diff} | {pct}{mark} |"
         lines.append(row)
     if reports and "n" in (reports[0].get("metrics") or {}):
         lines.append(f"| n（样本数） | " + " | ".join(str(r.get("metrics", {}).get("n")) for r in reports) + " |")
     lines.append("")
+
+    if noise_rows:
+        unorderable = [r for r in noise_rows if r[4] == "widest"]
+        head_only = [r for r in noise_rows if r[4] == "head"]
+        lines += ["> **[警告] 噪声地板**：本次对比使用了实测噪声地板"
+                  "（向量腿是 HNSW 近似检索，同一配置跨进程的**候选集合**都会变；"
+                  "实测 36 题里 24 题的集合不同，见 CHANGES §4.10.5）。", ""]
+        if unorderable:
+            lines.append(f"> **{len(unorderable)} 行的组间差异整体落在噪声之内 —— 这些行无法排序：**")
+            for name, raw, floor, floor_items, _kind in unorderable:
+                unit = f"{floor_items} 题" if floor_items is not None else "—"
+                lines.append(f">   - `{name}`：最宽一对 Δ={raw:+.4f} ≤ 地板 {floor:.4f}（{unit}）")
+            lines.append("")
+        if head_only:
+            lines.append(f"> 另有 {len(head_only)} 行的「首末两组」差异在噪声内（行内其它组仍可分）："
+                         + "、".join(f"`{r[0]}`" for r in head_only))
+            lines.append("")
 
     # ---- 指标口径说明（逐条写清 mock 与 real 下的真实算法）----
     lines += ["## 指标口径说明", ""]
@@ -300,6 +373,11 @@ def main() -> int:
 
     for conflict in caliber_conflicts(reports):
         print(f"[警告] 口径不一致：{conflict}\n")
+
+    # 噪声地板：与"口径不一致"同级的下结论前置条件（对比表里也会逐行标注）
+    if not any((r.get("meta", {}) or {}).get("noise_floor") for r in reports):
+        print("[警告] 参与对比的报告都没测过噪声地板（未用 --repeat）："
+              "1~2 题级的差异无法与噪声区分，下结论前请重新用 --repeat 3 跑。\n")
 
     text = render(reports, labels, worst=args.worst)
     print(text)

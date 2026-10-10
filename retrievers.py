@@ -83,16 +83,33 @@ def load_all_documents(vector_store) -> list[Document]:
 
 # --------------------------------------------------------------------------- 各种检索器
 class VectorRetriever:
-    """向量检索：复用原项目的 Chroma 检索器，只是允许指定返回条数"""
+    """向量检索：复用原项目的 Chroma 检索器，只是允许指定返回条数
+
+    ★ 确定性排序（重要，别删）：
+      Chroma 0.4.x 的向量检索走 HNSW **近似**最近邻，索引图是在进程内重建的，
+      对"距离近似并列"的候选会返回不同顺序 —— 实测同一配置跑 5 个独立进程，
+      doc_hit@1 在 0.6111~0.6667 之间抖动（= 2 题 / 36 的噪声地板，见 CHANGES §4.10.5）。
+      这里显式按「距离 → 片段指纹」排序，把"并列时看运气"变成"并列时看内容指纹"，
+      使排序与进程无关。
+      注意：它只能消除**排序**抖动；若 HNSW 连候选集合本身都漏召了，
+      这种排序救不回来，那部分只能靠 --repeat 测量并披露。
+    """
 
     name = "vector"
 
     def __init__(self, vector_store_service, k: int):
         self.k = k
-        self._retriever = vector_store_service.get_retriever(k=k)
+        self._service = vector_store_service
+        self._store = vector_store_service.vector_store
 
     def invoke(self, question: str) -> list[Document]:
-        return list(self._retriever.invoke(question))
+        # 用带分数的检索（原来是 as_retriever，拿不到距离，也就无从稳定排序）
+        pairs = self._store.similarity_search_with_score(question, k=self.k)
+        ordered = sorted(
+            pairs,
+            key=lambda pair: (float(pair[1]), _doc_key(pair[0])),   # 距离升序（Chroma 返回的是距离，越小越近）
+        )
+        return [doc for doc, _distance in ordered]
 
 
 class BM25Retriever:
@@ -114,6 +131,9 @@ class BM25Retriever:
         if self._bm25 is None:
             return []
         scores = self._bm25.get_scores(tokenize(question))
+        # 这里刻意**不动**：BM25 是精确打分，且实测跨进程完全确定
+        # （3 个独立进程对全量问题的排序哈希完全一致，见 CHANGES §4.10.5）。
+        # 与向量腿不同，它没有"近似检索"带来的顺序抖动，因此不需要 tie-break 改造。
         order = np.argsort(scores)[::-1][: self.k]
 
         hits: list[Document] = []
@@ -142,7 +162,9 @@ def rrf_fuse(result_lists: Sequence[Sequence[Document]], rrf_k: int = 60, top_n:
             pool.setdefault(key, doc)
             scores[key] = scores.get(key, 0.0) + 1.0 / (rrf_k + rank)
 
-    ordered = sorted(scores.items(), key=lambda pair: pair[1], reverse=True)
+    # 排序 key 加上片段指纹：RRF 分数并列时（两路排名完全相同就会并列）不再依赖
+    # dict 插入顺序，也就不会把某一条腿的返回顺序传染给融合结果
+    ordered = sorted(scores.items(), key=lambda pair: (-pair[1], pair[0]))
     fused: list[Document] = []
     for key, score in ordered[:top_n]:
         doc = pool[key]
@@ -203,7 +225,9 @@ class DashScopeReranker:
             print("[检索] 重排结果为空，降级为粗排顺序")
             return documents[:top_n]
 
-        ordered = sorted(results, key=lambda item: item.get("relevance_score", 0), reverse=True)
+        # 并列时按候选原下标排序（确定性；顺带与"距离→指纹"的口径保持一致：都不看返回顺序）
+        ordered = sorted(results, key=lambda item: (-float(item.get("relevance_score", 0)),
+                                                    int(item.get("index", 0))))
         reranked: list[Document] = []
         for item in ordered[:top_n]:
             doc = documents[item["index"]]
