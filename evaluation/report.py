@@ -262,7 +262,7 @@ def render(reports: list[dict], labels: list[str], worst: int = 0) -> str:
         head_only = [r for r in noise_rows if r[4] == "head"]
         lines += ["> **[警告] 噪声地板**：本次对比使用了实测噪声地板"
                   "（向量腿是 HNSW 近似检索，同一配置跨进程的**候选集合**都会变；"
-                  "实测 36 题里 24 题的集合不同，见 CHANGES §4.10.5）。", ""]
+                  "实测 36 题里 24 题的集合不同，见 CHANGES §4.11.2）。", ""]
         if unorderable:
             lines.append(f"> **{len(unorderable)} 行的组间差异整体落在噪声之内 —— 这些行无法排序：**")
             for name, raw, floor, floor_items, _kind in unorderable:
