@@ -376,7 +376,8 @@ curl.exe -s -X POST http://127.0.0.1:8020/chat -H "Content-Type: application/jso
 #### 其余局限
 
 - **IR 指标不要放进 CI 门禁**：向量腿跨进程不确定，做成门禁会随机变红。
-  本项目的 CI（若有）只跑确定性单元测试，**不跑 IR 评测**。
+  本项目的 CI **只跑确定性单元测试**（`.github/workflows/tests.yml`），
+  **不跑 IR 评测、也不跑 RAGAS** —— 每个 job 的 summary 里都有这句声明（见下节）。
 - `candidate_k` 也是隐藏变量：同一配置（hybrid + 300/30）**同为 3 次均值**时，
   候选 32 的 `doc_hit@1 = 0.6759` (±0.028)、候选 10 的 `doc_hit@1 = 0.6204` (±0.028)。
   差 2 题、地板 1 题 —— 余量仅 2× 地板，**属边界，不作为结论**。
@@ -384,6 +385,43 @@ curl.exe -s -X POST http://127.0.0.1:8020/chat -H "Content-Type: application/jso
 - `recall@k` 不可跨分块配置比较（语料片段数不同）。
 - 噪声地板本身是小样本估计（同配置 5 次测到 2 题、3 次测到 3 题），读作"≈3 题"；正式下结论建议 `--repeat 5`。
 - 评测集由 AI 撰写（非人工标注），构造原则、实测改写比例（38.9%）与校验方式见 `CHANGES.md` §4.9.2。
+
+---
+
+## 测试与 CI
+
+```powershell
+# 装测试依赖（Windows 上必须先设 PYTHONUTF8，否则 pip 读带中文注释的文件会 GBK 解码错）
+$env:PYTHONUTF8='1'
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+
+# 跑测试（98 条，约 4 秒；不联网、不需要 API Key、不需要本地嵌入服务）
+.\.venv\Scripts\python.exe -m pytest
+
+# 生成 job summary 并预览（CI 里靠 GITHUB_STEP_SUMMARY 追加到页面上）
+.\.venv\Scripts\python.exe -m pytest --junitxml=junit.xml
+.\.venv\Scripts\python.exe scripts\ci_summary.py junit.xml
+```
+
+**测什么**（都是"改动容易踩回去"的地方，不是为覆盖率凑数）：
+
+| 测试文件 | 钉住什么 |
+|---|---|
+| `test_hygiene.py` | 配置路径必须绝对（换目录启动会读写到不同向量库）；**废弃配置不得复活**；代码里的 `CHANGES §x.y` 必须真的有这一节；`.env` 必须被 git 忽略 |
+| `test_chunking_and_extract.py` | ★ **chunk_size 对短文档失效**那个缺陷的回归（150 → 2 片段、1000 → 1 片段）；txt 的 utf-8/gbk 回退；PDF 走 pypdf；MD5 去重仍生效 |
+| `test_retrievers.py` | ★ 单路检索**必须仍截断到 k**（曾因短路优化返回 candidate_k 条，静默改变基线）；并列时排序由**内容指纹**决定（与返回顺序无关）；重排无 Key 时降级不崩 |
+| `test_report_guardrails.py` | ★ 噪声地板取值口径 + **两级自动标注**（整行不可排序 / 仅首末噪声内）；四项口径拦截（k / candidate_k / 后端+维度 / 重排） |
+| `test_merge_reports.py` | ★ headline 噪声地板**不得被 lift 这类大量纲指标带跑偏**（曾算出"11.5 题 / 6"） |
+| `test_ir_metrics.py` | `precision@k` 的分母恒为 k；`lift` 换算；`base_rate` 不除零；三种口径文本必须自带"偏袒谁/有无循环性" |
+| `test_dataset.py` | 评测集结构校验；`answer_keywords` 必须真的能在**来源文档**里找到（否则对抗口径静默全 0） |
+| `test_import_smoke.py` | ★ 全部模块能 import + **`RagService` 能构造** —— 这是 `CHANGES` §5.2 那个**致命 ImportError** 的固化回归（当时它只是文档里的一句命令，而 mock 评测链路发现不了它） |
+| `test_ci_summary.py` | CI summary 的统计正确，且**"不跑 IR / 不跑 RAGAS"的声明不可腐化** |
+
+**CI 刻意不跑什么**（`.github/workflows/tests.yml`，每个 job 的 summary 都会打印这段声明）：
+
+- ❌ **不跑 IR 评测** —— IR 指标本身确定，但**向量腿不是**（HNSW 近似检索，跨进程候选集合会变），
+  做成门禁会随机变红。它只在需要时人工跑，且必须带 `--repeat 3` 输出实测噪声地板。
+- ❌ **不跑 RAGAS** —— 4 个指标需要 LLM 裁判（`DASHSCOPE_API_KEY`），仓库里不存密钥。
 
 ---
 
@@ -398,21 +436,44 @@ KnowledgeBase-RAG-LLM-System/
 ├─ retrievers.py              检索策略层（向量 / BM25 / RRF / 重排）
 ├─ vector_stores.py           Chroma 封装
 ├─ knowledge_base.py          文档抽取（txt/pdf）、切分、去重、入库
+├─ embeddings.py              嵌入后端（dashscope / local）与向量库指纹校验
 ├─ file_history_store.py      会话历史文件存储
 ├─ config_data.py             全局配置
+├─ .github/workflows/
+│  └─ tests.yml               CI：只跑确定性单测（不跑 IR、不跑 RAGAS）
+├─ tests/                     ★ 98 条确定性单测（见上节）
+│  ├─ conftest.py             公共装置（路径注入 / 状态隔离 / 离线嵌入替身）
+│  ├─ test_hygiene.py         路径、废弃配置、文档交叉引用、密钥忽略
+│  ├─ test_chunking_and_extract.py
+│  ├─ test_retrievers.py
+│  ├─ test_report_guardrails.py
+│  ├─ test_merge_reports.py
+│  ├─ test_import_smoke.py    ★ 全模块 import + RagService 可构造（§5.2 缺陷回归）
+│  ├─ test_ir_metrics.py
+│  ├─ test_dataset.py
+│  └─ test_ci_summary.py
 ├─ scripts/
-│  └─ ingest.py               命令行入库（支持分块参数 / 集合隔离 / --dry-run）
+│  ├─ ingest.py               命令行入库（支持分块参数 / 集合隔离 / --dry-run）
+│  ├─ build_corpus.py         抓取评测语料（可重跑）
+│  └─ ci_summary.py           把 junit.xml 变成 job summary（含覆盖范围声明）
 ├─ evaluation/
 │  ├─ dataset.py              评测集构建（29 条内置样本 + JSONL 读写）
 │  ├─ eval_set.jsonl          权威评测集（可直接手工增删）
+│  ├─ eval_set_v2.jsonl       扩语料后的评测集（36 题）
+│  ├─ build_eval_set.py       出题脚本（含答案关键词程序化校验）
+│  ├─ ir_metrics.py           确定性 IR 指标 + lift 归一化 + 口径文本
+│  ├─ run_ir.py               跑 IR 评测（支持 --repeat N 输出噪声地板）
 │  ├─ run_ragas.py            跑评测：链路产出 + RAGAS 打分 + 落 JSON
 │  ├─ offline.py              离线替身（本地切分 / 字面检索 / 启发式代理指标）
-│  ├─ report.py               报告与对比表（含指标口径说明小节）
+│  ├─ report.py               报告与对比表（含指标口径说明 + 噪声内自动标注）
 │  ├─ experiments.py          对比实验驱动（分块参数 × 检索策略）
 │  ├─ requirements-eval.txt   评测依赖（ragas 0.1.21）
 │  └─ constraints-eval.txt    主依赖版本约束（防误升级）
 ├─ requirements.txt           原项目依赖（版本锁定未改动）
 ├─ requirements-optim.txt     检索优化依赖（rank-bm25 + jieba）
+├─ requirements-dev.txt       测试依赖（pytest）
+├─ pytest.ini
+├─ corpus/                    评测语料（12 篇 Python 中文文档）
 ├─ assets/                    示例语料与 README 配图
 ├─ CHANGES.md                 改造记录：原项目 / 改了什么 / 量化结果 / 结论有效性划定
 └─ LICENSE

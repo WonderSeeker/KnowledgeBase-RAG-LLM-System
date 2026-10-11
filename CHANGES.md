@@ -963,17 +963,22 @@ INFO:     Uvicorn running on http://127.0.0.1:8020 (Press CTRL+C to quit)
 
 ### 5.5 阶段 4 剩余项
 
-- [x] a) FastAPI 包装（端口 8020，`/health` + `/chat`，缺 Key 返回明确错误）
-- [x] b) 注册进 `svc.ps1`（短名 `kbapi`，BOM/CRLF/语法均校验通过）
-- [x] d) CHANGES.md 划定「有效产出 / 暂无效结论」两栏（见 六、结论有效性划定）
-- [ ] c) README 骨架（架构图 + 检索策略说明 + 模块结构 + 缺陷清单 + 启动方式）
-- [ ] 接入真实嵌入：新增 `--embedding-backend dashscope|local`（local 指向本地
-      `http://127.0.0.1:11434/v1/embeddings`，bge-small-zh-v1.5 / 512 维），
-      并按「嵌入后端 + 维度」隔离 collection（等通知开始）
-- [ ] 建 IR 指标：Hit Rate@k / MRR / Recall@k / nDCG@k（确定性、不需 LLM judge；等真实嵌入到位）
-- [ ] 重排的真实收益数字（等嵌入与 IR 到位后再定，需 rerank 模型）
-- [ ] 真实 `report_optimized.json` 与真实对比表
-- [ ] 本地 LLM 替换云端（零成本对比，等通知）
+> 这份清单曾经腐化过：它把 README 骨架 / 真实嵌入 / IR 指标都写成"未做"，
+> 而这三件**后来都做完了**（分别在 5.7、4.10~4.11、5.8）。现已按实际状态重写 ——
+> **勾选状态必须能指到对应小节，否则它就是一份会说谎的清单。**
+
+| 项 | 状态 | 见 |
+|---|---|---|
+| a) FastAPI 包装（:8020，`/health` + `/chat`，缺 Key 返回明确错误而非崩） | ✅ | 5.1 |
+| b) 注册进 `svc.ps1`（短名 `kbapi`，BOM/CRLF/语法均校验通过） | ✅ | 5.1 |
+| c) README 骨架（架构 + 检索策略 + 模块结构 + 缺陷清单 + 启动方式 + 测试与 CI） | ✅ | README |
+| d) CHANGES 划定「有效产出 / 暂无效结论」两栏 | ✅ | 六 |
+| 接入真实嵌入（`--embedding-backend dashscope\|local`，local 走本地 11434；按「后端 + 维度」隔离 collection） | ✅ | 5.6 / 5.7 |
+| 建 IR 指标（Hit Rate@k / MRR / Recall@k / nDCG@k / lift；确定性，不需 LLM 裁判） | ✅ | 4.10 / 4.11 / README |
+| **测试层 + CI**（98 条确定性单测；CI 只跑单测，不跑 IR/RAGAS） | ✅ | **5.8** |
+| 重排的真实收益数字 | ⏳ **等 `DASHSCOPE_API_KEY`** | 4.7 |
+| 真实 `report_optimized.json` 与真实对比表 | ⏳ 同上 | 3.6 / 4.7 |
+| 本地 LLM 替换云端（零成本对比） | ⬜ 未做（非阻塞） | — |
 
 ### 5.6 本地嵌入服务接入规格（已实机核对，供第 3 步实施用）
 
@@ -1144,6 +1149,80 @@ def preflight_local():
 > 判定标准只有一条：**结论里的「检索」和「打分」是否都是真的。**
 > 只要有一方是替身，该结论就不具备可迁移性。
 
+### 5.8 测试层与 CI（原"无 CI、无单元测试"这个缺口已闭合）
+
+#### 5.8.1 为什么现在才补
+
+项目此前**没有 `.github`、没有 `tests/`**。评测层（IR 指标）替它承担了一部分"回归"职责，
+但评测**走的是替身/独立路径**，恰恰发现不了 §5.2 那个致命缺陷：
+`RagService` 完全无法构造（`ImportError`），而 mock 链路**从不 import `rag`**，
+于是**评测全绿、系统其实一句都答不出来**。
+
+§5.2 结尾已经把教训写成一句话："必须靠导入全量模块的冒烟测试兜住"。
+本节就是把那句话变成**真正的测试**，并把 CI 建起来。
+
+#### 5.8.2 98 条确定性测试（不联网 / 不需要 Key / 不需要本地嵌入服务）
+
+| 测试文件 | 条数 | 钉住什么 |
+|---|---|---|
+| `tests/test_hygiene.py` | 8 | 配置路径必须绝对（换目录启动会读写到不同向量库）；**废弃配置不得复活**；代码里的 `CHANGES §x.y` 必须真有这一节；`.env` / 向量库 / 评测中间产物必须被 git 忽略 |
+| `tests/test_chunking_and_extract.py` | 9 | ★ **chunk_size 对短文档失效**那个缺陷的回归（150 → 2 片段、1000 → 1 片段）；txt 的 utf-8/gbk 回退；PDF 走 pypdf；MD5 去重仍生效 |
+| `tests/test_retrievers.py` | 16 | ★ 单路检索**必须仍截断到 k**（曾因短路优化返回 `candidate_k` 条，静默改变基线）；并列时排序由**内容指纹**决定（与返回顺序无关）；BM25 命中/过滤；重排无 Key 时降级不崩 |
+| `tests/test_report_guardrails.py` | 12 | ★ 噪声地板取值口径 + **两级自动标注**（整行不可排序 / 仅首末噪声内）；四项口径拦截（`k` / `candidate_k` / 后端+维度 / 重排） |
+| `tests/test_merge_reports.py` | 6 | ★ headline 噪声地板**不得被 `lift` 这类大量纲指标带跑偏**（曾算出"11.5 题 / 6"） |
+| `tests/test_import_smoke.py` | 12 | ★ **§5.2 那个致命 ImportError 的固化回归**：全部模块能 import + `RagService` 能构造 + 正确导入路径有效 |
+| `tests/test_ir_metrics.py` | 17 | `precision@k` 分母恒为 k；`lift` 换算；`base_rate` 不除零；三种口径文本必须自带"偏袒谁 / 有无循环性" |
+| `tests/test_dataset.py` | 9 | 评测集结构校验；`answer_keywords` 必须真能在**来源文档**里找到（否则对抗口径**静默全 0**） |
+| `tests/test_ci_summary.py` | 9 | CI summary 统计正确，且**"不跑 IR / 不跑 RAGAS"的声明不可腐化** |
+
+本地跑：`python -m pytest` → **98 passed, 约 4 秒**。
+
+#### 5.8.3 CI：跑什么、**不跑什么**（这是本次最容易做错的地方）
+
+`.github/workflows/tests.yml`：Ubuntu + **Python 3.11**（必须：`chroma-hnswlib==0.7.3` 没有 cp312 轮子，
+3.12 上要现场编译 C++ 并失败）、装三个 requirements、跑 pytest、上传 `junit.xml`、写 job summary。
+
+★ **不跑什么，以及为什么必须写在 CI 页面上**（而不是只写在 workflow 注释里 —— 没人看注释）：
+
+| 不跑 | 原因 |
+|---|---|
+| **IR 评测** | IR 指标本身确定，但**向量腿不是**（HNSW 近似检索，跨进程候选集合会变，§4.10.5 / §4.11.2）。做成门禁会**随机变红** |
+| **RAGAS** | 4 个指标需要 LLM 裁判（`DASHSCOPE_API_KEY`），仓库里不存密钥 |
+
+这段声明由 `scripts/ci_summary.py` 写进**每个 job 的 summary**，并且有 9 条测试钉住它 ——
+**防止这句声明被删改之后，公开的绿勾被误读成"所有测试都过了"**。
+
+#### 5.8.4 落地时抓到的两个事实（都不是猜的）
+
+1. **`RagService` 构造时会真的发一次嵌入请求**：`rag.py` → `embeddings.prepare()` → `observed_dim()`
+   （要实测向量维度）。所以"构造冒烟"**必须先换掉嵌入后端**，否则它会因 401 / 连不上本地服务而失败 ——
+   那是**环境问题**，混进来会让这条最关键的测试变成"看运气"。
+   （顺带修正一个理解：§5.2 的构造证据应当是在嵌入后端可用时取得的。）
+2. **`BM25Okapi` 的 IDF 在小语料 / 高频词上会 ≤ 0**，而实现会把非正分片段过滤掉
+   （"完全不相干的片段不要塞进来当噪声"）。所以 BM25 的测试语料必须够大、目标词必须够稀有，
+   否则测出来是空列表 —— 那是**正常行为，不是 bug**。已写进测试注释，免得以后被人"修好"。
+
+#### 5.8.5 命令
+
+```powershell
+# 装测试依赖（Windows 上必须先设 PYTHONUTF8，否则 pip 读带中文注释的文件会 GBK 解码错）
+$env:PYTHONUTF8='1'
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt -c evaluation\constraints-eval.txt
+
+# 跑测试
+.\.venv\Scripts\python.exe -m pytest
+
+# 本地预览 CI 会写进页面的 summary
+.\.venv\Scripts\python.exe -m pytest --junitxml=junit.xml
+.\.venv\Scripts\python.exe scripts\ci_summary.py junit.xml
+```
+
+#### 5.8.6 仍未做的（如实列出）
+
+- **覆盖率统计**：没装 `pytest-cov`。不追求覆盖率数字 —— 上面每一条都是"改动容易踩回去"的地方，
+  不是为凑数。
+- **端到端问答的自动化**：需要 `DASHSCOPE_API_KEY`，且与"IR 不进 CI"同一个理由（不稳定）。
+
 ### 6.1 有效产出（可以作为结论）
 
 | # | 产出 | 为什么有效 | 证据落在哪 |
@@ -1171,8 +1250,10 @@ def preflight_local():
 | 21 | **负结果（有价值）**：确定性 tie-break 改造消不掉噪声 —— 改造后"仅顺序不同"= 0 题、"集合不同"= 24 题，证明只能披露 | 24/36 题集合级差异，且查询向量跨进程逐位一致 | 4.11.2 |
 | 22 | 用 3 次均值刷新两张表，并把结论**三层收口**：噪声层（"余量充足"→分档）+ **口径层**（`chunk_*` 6 行是嵌入同源、不算独立证据，只有 `kw_*` 2 行能进结论区）+ **估计层**（两个 `@1` 余量 1.35~1.43× 小于地板自身 1.5× 不确定度，也不进） | 结论区最终只剩 1 句 | 4.11.3 |
 | 23 | **报数纠错**：4.11.1 初版"35 行 / 4 行"是从**过滤后的终端输出**里数的（与 4.10.5 混入 `candidate_k=32` 属同类错误）；同时明确机制边界 —— 它筛噪声、**筛不了口径质量** | 逐行数源表：39 = 5 + 26 + 8 | 4.11.1 |
+| 24 | **补齐测试层：98 条确定性单测**，其中包含 §5.2 那个**致命 ImportError** 的固化回归（此前只写在文档里的一句话命令）、`chunk_size` 缺陷回归、单路截断回归、噪声地板标注回归 | `python -m pytest` → 98 passed，约 4 秒 | 5.8.2 |
+| 25 | **CI 建成，且把"不跑什么"写进 job summary**：IR 不进 CI（向量腿会随机变红）、RAGAS 不进 CI（需 Key）；这段声明由脚本生成并有 9 条测试钉住，防它腐化后被误读成"全都过了" | `.github/workflows/tests.yml` + `scripts/ci_summary.py` + `tests/test_ci_summary.py` | 5.8.3 |
 
-这 23 条的共同点：**结论都配了可复现的证据，并且把局限写在结论旁边。**
+这 25 条的共同点：**结论都配了可复现的证据，并且把局限写在结论旁边。**
 （第 9 条是"能力验证"；第 12 条幅度在噪声内；第 15 条是**主动作废自己上一轮的结论**；
 第 16、17 条是**用新口径把作废掉的结论重新做成可信的样子** —— 这一轮的价值不在数字变大，
 而在"换了两种互不相同的标注机制，方向仍然一致"。）
