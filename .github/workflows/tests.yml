@@ -1,0 +1,64 @@
+name: 单元测试（确定性）
+
+# ★ 本项目刻意【不跑】IR 评测，也【不跑】RAGAS：
+#   - IR 指标本身确定，但**向量腿不是** —— chromadb 走 HNSW 近似检索，索引图每个进程重建，
+#     实测同一配置跨进程有 24/36 题的候选集合不同（CHANGES §4.10.5、§4.11.2）。
+#     做成门禁会**随机变红**，所以它只在需要时人工跑，且必须带 --repeat 3 输出实测噪声地板。
+#   - RAGAS 的 4 个指标需要 LLM 裁判（DASHSCOPE_API_KEY），而仓库里不存密钥。
+#   这份"覆盖范围声明"会被写进每个 job 的 summary（脚本 + 单测一起钉住，防它腐化）。
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # requirements*.txt 里带中文注释：非 UTF-8 默认编码下 pip 会报 UnicodeDecodeError（GBK）
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  unit-tests:
+    name: pytest（不联网、不需要 Key）
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          # ★ 必须 3.11：项目锁 chromadb<0.5 → chroma-hnswlib==0.7.3；
+          #   0.7.3 没有 cp312 的轮子（3.12 上要现场编译 C++，会失败）
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-optim.txt
+            requirements-dev.txt
+
+      - name: 安装依赖
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-optim.txt
+          python -m pip install -r requirements-dev.txt
+
+      - name: 跑单元测试
+        run: python -m pytest --junitxml=junit.xml
+
+      - name: 写入 job summary（含本次 CI 覆盖范围的声明）
+        if: always()
+        run: python scripts/ci_summary.py junit.xml
+
+      - name: 上传测试结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-report
+          path: junit.xml
+          if-no-files-found: warn

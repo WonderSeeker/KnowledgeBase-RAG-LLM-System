@@ -22,6 +22,10 @@ evaluation/cache/
 evaluation/runs/
 evaluation/reports/
 
+# ---- 测试产物 ----
+.pytest_cache/
+junit.xml
+
 # ---- 日志 ----
 *.log
 
