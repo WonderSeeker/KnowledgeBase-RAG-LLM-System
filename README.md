@@ -276,7 +276,7 @@ curl.exe -s -X POST http://127.0.0.1:8020/chat -H "Content-Type: application/jso
 
 ### 效果结论（真实嵌入 512 维 + 确定性 IR 指标）
 
-评测条件：语料为 `corpus/` 下 **12 篇 Python 中文文档（225,812 字）**，
+评测条件：语料为 `corpus/` 下 **12 篇 Python 中文文档（215,062 字符，约 21.5 万字）**，
 评测集 **36 题**（`evaluation/eval_set_v2.jsonl`，**实测 38.9% 为语义改写型**问题）。
 完整数据、口径陷阱、噪声地板与复现命令见 `CHANGES.md` §4.9 ~ §4.11。
 
