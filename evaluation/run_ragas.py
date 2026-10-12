@@ -23,6 +23,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -132,11 +133,7 @@ def run_pipeline(items: list[EvalItem], mode: str, top_k: int, candidate_k: int)
             "embedding_dim": None,
         }
 
-    if not os.environ.get("DASHSCOPE_API_KEY"):
-        raise SystemExit(
-            "未找到 DASHSCOPE_API_KEY。\n"
-            f"请把 Key 填进 {PROJECT_ROOT / '.env'}，或改用 --mode mock 先跑通流程。"
-        )
+    require_chat_key()
 
     from rag import RagService
     rag = RagService()
@@ -205,6 +202,12 @@ def score_with_ragas(records: list[dict], judge_provider: str, judge_model: str)
         "ground_truth": [r["ground_truth"] for r in records],
     })
 
+    # 裁判兼容性：不支持 n>1 的来源（如 DeepSeek）必须把 strictness 降到 1，
+    # 否则 answer_relevancy 会因为 400 而整列变成 N/A
+    if apply_judge_compat(judge_provider, answer_relevancy):
+        print(f"[评测] 裁判 {judge_provider} 只支持 n=1 → answer_relevancy.strictness 降到 1"
+              f"（默认是 3，会触发 400）")
+
     result = evaluate(
         dataset,
         metrics=[faithfulness, answer_relevancy, context_recall, context_precision],
@@ -221,6 +224,103 @@ def score_with_ragas(records: list[dict], judge_provider: str, judge_model: str)
     metrics = {name: (None if frame[name].isna().all() else float(frame[name].mean()))
                for name in METRIC_NAMES if name in frame.columns}
     return metrics, per_question
+
+
+def chat_api_key_env() -> str | None:
+    """生成模型需要哪个环境变量（None = 不需要）
+
+    ★ 与 `judge_api_key_env` 是同一类问题的两个位置：原实现把两边都写死成
+      DASHSCOPE_API_KEY，一旦换到 DeepSeek 就会误报"缺 key"。
+      裁判侧和生成侧都要按 `config.chat_backend` 判断 —— 这次是靠 1 条冒烟跑才发现的。
+    """
+    if config.chat_backend == "dashscope":
+        return "DASHSCOPE_API_KEY"
+    if config.chat_backend in ("openai-compatible", "openai_compatible", "deepseek"):
+        return config.openai_compatible_api_key_env
+    return None
+
+
+def require_chat_key() -> None:
+    """real 模式下生成答案前，确认**生成侧**的 key 就位（不是裁判侧的）"""
+    env_name = chat_api_key_env()
+    if env_name and not os.environ.get(env_name):
+        raise SystemExit(
+            f"生成模型（chat_backend={config.chat_backend}）需要环境变量 {env_name}。\n"
+            f"请把 Key 填进 {PROJECT_ROOT / '.env'}（该文件已在 .gitignore 中排除），"
+            f"或改用 --mode mock 先跑通流程。"
+        )
+
+
+# 只支持 n=1 补全请求的裁判来源（ragas 的 answer_relevancy 默认 strictness=3，会要 3 个生成结果）
+N1_ONLY_PROVIDERS = ("deepseek", "openai-compatible")
+
+
+def apply_judge_compat(provider: str, metric) -> bool:
+    """按裁判来源做兼容性调整；返回是否真的改了（便于日志与测试）
+
+    ★ 为什么必须有这一段（不是"可选的优化"）：
+      DeepSeek 等厂商会直接拒绝 n>1 的补全请求：
+        BadRequestError(400): Invalid n value (currently only n = 1 is supported)
+      于是 `answer_relevancy` **整列变成 N/A**（其它 3 个指标照常出分，很容易被忽略）。
+      这是在 **1 条冒烟跑**里发现的 —— 也正是"先跑 1 条再跑全量"的价值。
+    """
+    if provider in N1_ONLY_PROVIDERS and hasattr(metric, "strictness"):
+        metric.strictness = 1
+        return True
+    return False
+
+
+RAGAS_METRIC_NAMES = ("faithfulness", "answer_relevancy", "context_recall", "context_precision")
+
+
+def resolve_judge_model(provider: str, model: str | None) -> str:
+    """报告里该记的裁判模型名 —— 必须是**实际调用过的那个**
+
+    ★ 报数错误修正：`--judge-model` 的默认值是 `qwen-plus`（给 dashscope 准备的），
+      换到 DeepSeek 时实际用的是 config 里的 deepseek-chat。
+      如果直接记 `args.judge_model`，报告就会写 `qwen-plus` —— **而它一次都没被调用**。
+      第一次跑真实基线时就是这样（报告写了 qwen-plus，实际是 deepseek-chat）。
+    """
+    if provider in N1_ONLY_PROVIDERS:
+        return model if model and model != "qwen-plus" else config.openai_compatible_model
+    return model or ""
+
+
+def chunking_from_collection(name: str | None) -> tuple[int, int] | None:
+    """从集合名里解析**真实**的分块参数（集合名形如 `rag_local_corpus_c300_o30`）
+
+    ★ 为什么必须有：real 模式下检索不切分，"分块参数"其实由**入库时**决定。
+      报告原先记的是 `config.chunk_size`（默认 1000/100），而实测集合是 `c300_o30`
+      —— 等于报告写了一个**它根本没用到**的分块参数（第一次跑真实基线时就是这样，
+      报告显示 1000/100，实际语料是 300/30）。
+    """
+    if not name:
+        return None
+    match = re.search(r"_c(\d+)_o(\d+)$", name)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def scored_counts(per_question: list[dict], metric_names=RAGAS_METRIC_NAMES) -> dict:
+    """每个指标真正拿到分数的样本数
+
+    ragas 用 `raise_exceptions=False` 跑，单条打分失败**不会中断整轮**，但那条样本
+    在该指标上就是缺失值。所以指标的均值是"可用样本上的均值"——
+    分母必须显式记下来，否则读者会以为 36 条全打上了分（实测 faithfulness 是 35/36）。
+    """
+    counts: dict[str, int] = {}
+    for name in metric_names:
+        total = 0
+        for row in per_question:
+            value = row.get(name)
+            if value is None:
+                continue
+            if isinstance(value, float) and math.isnan(value):
+                continue
+            total += 1
+        counts[name] = total
+    return counts
 
 
 def judge_api_key_env(provider: str) -> str | None:
@@ -271,7 +371,7 @@ def build_judge_llm(provider: str, model: str):
             raise SystemExit(f"裁判来源 {provider} 需要环境变量 {env_name}")
         # --judge-model 的默认值是给 dashscope 准备的（qwen-plus）；
         # 换到 OpenAI 兼容端点时若没显式指定，就用 config 里的模型名，避免拿 qwen-plus 去打 DeepSeek
-        resolved = model if model and model != "qwen-plus" else config.openai_compatible_model
+        resolved = resolve_judge_model(provider, model)
         return ChatOpenAI(
             model=resolved,
             api_key=key,
@@ -412,7 +512,15 @@ def main(argv: list[str] | None = None) -> int:
     else:
         metrics, per_question = score_with_heuristic(records)
 
+    # 每个指标的有效样本数：单条打分失败会被跳过（raise_exceptions=False），
+    # 分母必须显式记录 —— 否则读者会以为全部样本都打上了分
+    scored = scored_counts(per_question)
+    if scored:
+        metrics["n"] = min(scored.values())
+    incomplete = {name: count for name, count in scored.items() if count < len(records)}
+
     # 3) 出报告
+    real_chunk = chunking_from_collection(run_env.get("collection"))
     elapsed = time.perf_counter() - started
     total_seconds = [r.get("total_seconds") or 0 for r in records]
     report = {
@@ -421,7 +529,9 @@ def main(argv: list[str] | None = None) -> int:
             "mode": args.mode,
             "judge": judge,
             "judge_provider": args.judge_provider if judge == "ragas" else None,
-            "judge_model": args.judge_model if judge == "ragas" else None,
+            # ★ 记"实际调用过的"裁判模型名，而不是命令行原始值（见 resolve_judge_model）
+            "judge_model": resolve_judge_model(args.judge_provider, args.judge_model)
+            if judge == "ragas" else None,
             # ★ 记下生成侧用的模型：若它与裁判模型相同，就是"自己给自己打分"（自我偏好偏差），
             #   必须让读报告的人看得见这一点，否则分数会被当成中立的
             "chat_backend": config.chat_backend,
@@ -431,6 +541,8 @@ def main(argv: list[str] | None = None) -> int:
             "run_seconds": round(elapsed, 2),
             "eval_set": str(Path(args.eval_set)),
             "eval_size": len(records),
+            # 逐指标的有效样本数（缺哪个指标、缺几条，一眼可见）
+            "scored_per_metric": scored,
             "retrieval": {
                 "method": config.retrieval_method,
                 "offline_stand_in": args.mode == "mock",
@@ -439,8 +551,14 @@ def main(argv: list[str] | None = None) -> int:
                 "rrf_k": config.rrf_k if config.retrieval_method == "hybrid" else None,
                 "rerank": config.rerank_enabled,
                 "rerank_model": config.rerank_model if config.rerank_enabled else None,
-                "chunk_size": config.chunk_size,
-                "chunk_overlap": config.chunk_overlap,
+                # 分块参数：real 模式的切分发生在**入库时**，所以优先从集合名解析真实值；
+                # 解析不到就记 None（"未知"），而不是把 config 默认值冒充成实际值
+                "chunk_size": (real_chunk[0] if real_chunk else
+                               (config.chunk_size if args.mode == "mock" else None)),
+                "chunk_overlap": (real_chunk[1] if real_chunk else
+                                  (config.chunk_overlap if args.mode == "mock" else None)),
+                "chunk_source": ("集合名解析" if real_chunk else
+                                 ("config（离线切分真实生效）" if args.mode == "mock" else "未知")),
                 # 实际使用（run_env 来自真实的检索器对象，不是 config 推断）
                 "collection": run_env["collection"],
                 "embedding_backend": run_env["embedding_backend"],
@@ -459,7 +577,10 @@ def main(argv: list[str] | None = None) -> int:
             "avg_total_seconds": round(sum(total_seconds) / len(records), 3) if records else None,
             "avg_n_contexts": round(sum(r["n_contexts"] for r in records) / len(records), 2) if records else None,
             "warning": ("MOCK 数据：检索与打分都是离线替身，仅用于验证评测流程可跑通，不代表真实效果"
-                        if args.mode == "mock" or judge == "heuristic" else None),
+                        if args.mode == "mock" or judge == "heuristic" else
+                        (f"部分指标未覆盖全部样本：{incomplete}（共 {len(records)} 条）。"
+                         f"单条打分失败的样本会被跳过，这些指标是**可用样本上的均值**"
+                         if incomplete else None)),
         },
         "metrics": metrics,
         "per_question": per_question,

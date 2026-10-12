@@ -162,8 +162,12 @@ def describe(report: dict) -> str:
         detail += f" 候选={retrieval.get('candidate_k')}"
     if retrieval.get("rerank"):
         detail += f" 重排={retrieval.get('rerank_model')}"
+    # 分块可能是"未知"（real 模式的切分发生在入库时，集合名解析不到就不该硬填 config 默认值）
+    chunk_size, chunk_overlap = retrieval.get("chunk_size"), retrieval.get("chunk_overlap")
+    chunk_text = (f"语料分块={chunk_size}/{chunk_overlap}" if chunk_size is not None
+                  else f"语料分块=未知（{retrieval.get('chunk_source') or '未记录'}）")
     return (f"{meta.get('name')} | 模式={meta.get('mode')} 裁判={meta.get('judge')} | {detail}"
-            f" | 语料分块={retrieval.get('chunk_size')}/{retrieval.get('chunk_overlap')}"
+            f" | {chunk_text}"
             f"{repeat_text(report)}"
             f" | {meta.get('generated_at')}")
 
@@ -338,12 +342,28 @@ def render(reports: list[dict], labels: list[str], worst: int = 0) -> str:
                 continue
             scored = sorted(items, key=lambda item: (item.get(sort_key) is None, item.get(sort_key)))
             lines += [f"## 低分样本（{label} 按 {sort_key} 最低 {min(worst, len(scored))} 条）", ""]
-            lines += ["| id | 问题 | 命中片段 | 检索到的文档（按排名） | 命中@1 | MRR |",
-                      "|---|---|---|---|---|---|"]
+
+            # 列按"报告里真有的字段"决定：IR 报告有文档级命中，RAGAS 报告有四个 RAGAS 指标。
+            # 别用固定的 IR 列去渲染 RAGAS 报告 —— 那会满屏"（无）/N/A"，看起来像数据坏了。
+            ir_cols = ("ranked_docs", "doc_hit@1", "doc_rr")
+            has_ir = any(item.get("ranked_docs") is not None or item.get("doc_hit@1") is not None
+                         for item in items)
+            score_cols = [name for name in metric_names_of([report])
+                          if items[0].get(name) is not None and name not in ir_cols]
+
+            header = ["id", "问题", "命中片段"]
+            if has_ir:
+                header += ["检索到的文档（按排名）", "命中@1", "MRR"]
+            header += score_cols
+            lines += ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
+
             for item in scored[:worst]:
-                ranked = " > ".join(item.get("ranked_docs") or []) or "（无）"
-                lines.append(f"| {item.get('id')} | {item.get('question')} | {item.get('n_contexts')} | "
-                             f"{ranked} | {fmt(item.get('doc_hit@1'))} | {fmt(item.get('doc_rr'))} |")
+                cells = [str(item.get("id")), str(item.get("question")), str(item.get("n_contexts"))]
+                if has_ir:
+                    cells += [" > ".join(item.get("ranked_docs") or []) or "（无）",
+                              fmt(item.get("doc_hit@1")), fmt(item.get("doc_rr"))]
+                cells += [fmt(item.get(name)) for name in score_cols]
+                lines.append("| " + " | ".join(cells) + " |")
             lines.append("")
 
     return "\n".join(lines)

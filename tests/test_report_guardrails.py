@@ -142,6 +142,18 @@ def test_caliber_conflicts_silent_when_aligned():
 
 
 # --------------------------------------------------------------------------- 显示名
+def test_describe_shows_unknown_chunking_instead_of_a_wrong_number():
+    """分块解析不到时要写"未知"，不能把 config 默认值冒充成实际值"""
+    report_ = _report("r", {})
+    report_["meta"]["retrieval"].update({"chunk_size": None, "chunk_overlap": None,
+                                         "chunk_source": "未知"})
+    assert "未知" in report.describe(report_)
+
+    known = _report("r", {})
+    known["meta"]["retrieval"].update({"chunk_size": 300, "chunk_overlap": 30})
+    assert "语料分块=300/30" in report.describe(known)
+
+
 def test_metric_label_covers_all_three_calibers():
     assert "文档级" in report.metric_label("doc_hit_rate@1")
     assert "对抗口径" in report.metric_label("kw_precision@3")
