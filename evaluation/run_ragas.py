@@ -223,14 +223,59 @@ def score_with_ragas(records: list[dict], judge_provider: str, judge_model: str)
     return metrics, per_question
 
 
+def judge_api_key_env(provider: str) -> str | None:
+    """裁判来源对应的环境变量名（None = 不需要 key）"""
+    if provider == "dashscope":
+        return "DASHSCOPE_API_KEY"
+    if provider in ("deepseek", "openai-compatible"):
+        return config.openai_compatible_api_key_env
+    return None                     # ollama 是本地服务；dashscope-native 走 SDK 自己的读取逻辑
+
+
+def require_judge_key(provider: str) -> None:
+    """在真正打分前确认裁判的 key 就位，并给出**准确的变量名**
+
+    原来的实现写死了 DASHSCOPE_API_KEY，换成 DeepSeek 时会误报"缺 key"。
+    """
+    env_name = judge_api_key_env(provider)
+    if env_name and not os.environ.get(env_name):
+        raise SystemExit(
+            f"裁判来源 {provider} 需要环境变量 {env_name}"
+            f"（写进 .env 即可，该文件已在 .gitignore 中排除），或改用 --judge heuristic"
+        )
+
+
 def build_judge_llm(provider: str, model: str):
-    """裁判模型。默认走 DashScope 的 OpenAI 兼容端点——这是 RAGAS 最稳的接法"""
+    """裁判模型。默认走 DashScope 的 OpenAI 兼容端点——这是 RAGAS 最稳的接法
+
+    `deepseek` / `openai-compatible`：走 config 里那组 OpenAI 兼容配置，
+    这样"生成用 A、裁判用 B"或"两者都用 DeepSeek"都能表达，且不写死厂商。
+
+    ⚠️ 口径提醒：若**生成与裁判用同一个模型**，会引入"自我偏好"偏差。
+    报告 meta 里同时记录 `chat_model` 与 `judge_model`，就是为了让这一点可见。
+    """
     if provider == "dashscope":
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(
             model=model,
             api_key=os.environ["DASHSCOPE_API_KEY"],
             base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            temperature=0,
+        )
+    if provider in ("deepseek", "openai-compatible"):
+        from langchain_openai import ChatOpenAI
+
+        env_name = config.openai_compatible_api_key_env
+        key = os.environ.get(env_name)
+        if not key:
+            raise SystemExit(f"裁判来源 {provider} 需要环境变量 {env_name}")
+        # --judge-model 的默认值是给 dashscope 准备的（qwen-plus）；
+        # 换到 OpenAI 兼容端点时若没显式指定，就用 config 里的模型名，避免拿 qwen-plus 去打 DeepSeek
+        resolved = model if model and model != "qwen-plus" else config.openai_compatible_model
+        return ChatOpenAI(
+            model=resolved,
+            api_key=key,
+            base_url=config.openai_compatible_base_url,
             temperature=0,
         )
     if provider == "ollama":
@@ -244,7 +289,10 @@ def build_judge_llm(provider: str, model: str):
     if provider == "dashscope-native":
         from langchain_community.chat_models.tongyi import ChatTongyi
         return ChatTongyi(model=model)
-    raise SystemExit(f"未知的裁判来源：{provider}（可选 dashscope / ollama / dashscope-native）")
+    raise SystemExit(
+        f"未知的裁判来源：{provider}"
+        f"（可选 dashscope / deepseek / openai-compatible / ollama / dashscope-native）"
+    )
 
 
 def score_with_heuristic(records: list[dict]) -> tuple[dict, list[dict]]:
@@ -294,8 +342,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--judge", choices=["ragas", "heuristic"], default=None,
                         help="裁判：ragas=真 RAGAS；heuristic=离线代理指标。real 模式默认 ragas")
     parser.add_argument("--judge-provider", default="dashscope",
-                        choices=["dashscope", "ollama", "dashscope-native"], help="裁判模型来源")
-    parser.add_argument("--judge-model", default="qwen-plus", help="裁判模型名（打分用，别用太慢的模型）")
+                        choices=["dashscope", "deepseek", "openai-compatible", "ollama", "dashscope-native"],
+                        help="裁判模型来源。deepseek/openai-compatible 走 config 里的 OpenAI 兼容配置")
+    parser.add_argument("--judge-model", default="qwen-plus",
+                        help="裁判模型名（打分用，别用太慢的模型）。用 deepseek 时留空/默认即可，会取 config 里的模型名")
     parser.add_argument("--limit", type=int, default=None, help="只跑前 N 条，调试用")
     parser.add_argument("--reuse", default=None, help="复用已有的 runs jsonl，跳过 RAG 链路只重新打分")
     args = parser.parse_args(argv)
@@ -356,8 +406,8 @@ def main(argv: list[str] | None = None) -> int:
     print("-" * 78)
     if judge == "ragas":
         if args.mode == "mock" or args.reuse:
-            if not os.environ.get("DASHSCOPE_API_KEY"):
-                raise SystemExit("RAGAS 打分需要 DASHSCOPE_API_KEY（裁判模型）。请填入 .env，或改用 --judge heuristic")
+            # 这两种模式下 RAG 链路不跑云端，所以必须在这里显式确认裁判的 key 就位
+            require_judge_key(args.judge_provider)
         metrics, per_question = score_with_ragas(records, args.judge_provider, args.judge_model)
     else:
         metrics, per_question = score_with_heuristic(records)
@@ -372,6 +422,11 @@ def main(argv: list[str] | None = None) -> int:
             "judge": judge,
             "judge_provider": args.judge_provider if judge == "ragas" else None,
             "judge_model": args.judge_model if judge == "ragas" else None,
+            # ★ 记下生成侧用的模型：若它与裁判模型相同，就是"自己给自己打分"（自我偏好偏差），
+            #   必须让读报告的人看得见这一点，否则分数会被当成中立的
+            "chat_backend": config.chat_backend,
+            "chat_model": (config.chat_model_name if config.chat_backend == "dashscope"
+                           else config.openai_compatible_model),
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "run_seconds": round(elapsed, 2),
             "eval_set": str(Path(args.eval_set)),

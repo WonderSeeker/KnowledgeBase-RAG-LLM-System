@@ -17,6 +17,8 @@ from retrievers import (
     load_all_documents,
 )
 import embeddings as embeddings_module
+import os
+
 import config_data as config
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_community.chat_models.tongyi import ChatTongyi
@@ -28,6 +30,38 @@ def print_prompt(prompt):
     print("="*20)
 
     return prompt
+
+
+def build_chat_model():
+    """按 config.chat_backend 造生成模型
+
+    - `dashscope`（默认）：通义千问，**行为与改造前完全一致**（默认路径不变）；
+    - `openai-compatible`：任何 OpenAI 兼容端点 —— DeepSeek、本地 11434（零成本对比）等。
+      base_url / 模型名 / "从哪个环境变量取 key" 全部由 config 决定，不写死厂商。
+
+    ★ 为什么需要它：RAGAS 的 faithfulness / answer_relevancy 要有**真实生成的答案**，
+      而裁判 LLM 与生成 LLM 可以是两个来源（例如生成用 DeepSeek、裁判用另一个模型）。
+    """
+    backend = config.chat_backend
+    if backend == "dashscope":
+        return ChatTongyi(model=config.chat_model_name)
+    if backend in ("openai-compatible", "openai_compatible", "deepseek"):
+        from langchain_openai import ChatOpenAI
+
+        env_name = config.openai_compatible_api_key_env
+        key = os.environ.get(env_name)
+        if not key:
+            raise SystemExit(
+                f"chat_backend={backend} 需要环境变量 {env_name}（写进 .env 即可，"
+                f"该文件已在 .gitignore 中排除）"
+            )
+        return ChatOpenAI(
+            model=config.openai_compatible_model,
+            api_key=key,
+            base_url=config.openai_compatible_base_url,
+            temperature=0,
+        )
+    raise SystemExit(f"未知的 chat_backend：{backend}（可选 dashscope / openai-compatible）")
 
 
 class RagService(object):
@@ -63,7 +97,8 @@ class RagService(object):
             ]
         )
 
-        self.chat_model = ChatTongyi(model=config.chat_model_name)
+        # 生成模型由 config.chat_backend 决定（默认 dashscope = 通义千问，行为不变）
+        self.chat_model = build_chat_model()
 
         self.chain = self.__get_chain()
 

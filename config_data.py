@@ -65,6 +65,16 @@ local_embedding_api_key = "dummy-not-used"            # 本地服务不校验密
 embedding_model_name="text-embedding-v4"
 chat_model_name="qwen3-max"
 
+# ---------------- 生成模型后端 ----------------
+# 为什么要它：RAGAS 的 faithfulness / answer_relevancy 需要**真实生成的答案**，
+#   而裁判 LLM 与生成 LLM 可以是两个来源。默认保持 dashscope（通义千问），行为与改造前完全一致。
+#   openai-compatible：任何 OpenAI 兼容端点 —— DeepSeek、本地 11434（零成本对比）都能用它。
+# ★ 注意：DeepSeek 等厂商**没有 embeddings 接口**，嵌入必须另找来源（本项目用本地 bge）。
+chat_backend = os.environ.get("CHAT_BACKEND", "dashscope")          # dashscope | openai-compatible
+openai_compatible_base_url = os.environ.get("OPENAI_COMPATIBLE_BASE_URL", "https://api.deepseek.com/v1")
+openai_compatible_model = os.environ.get("OPENAI_COMPATIBLE_MODEL", "deepseek-chat")
+openai_compatible_api_key_env = os.environ.get("OPENAI_COMPATIBLE_API_KEY_ENV", "DEEPSEEK_API_KEY")
+
 #
 session_config = {
     "configurable": {
