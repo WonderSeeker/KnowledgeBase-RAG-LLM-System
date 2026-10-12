@@ -134,8 +134,15 @@
 ```powershell
 cd D:\Projects\KnowledgeBase-RAG-LLM-System
 
-# 真实 RAGAS 评测（需要 .env 里的 DASHSCOPE_API_KEY）
+# 真实 RAGAS 评测 —— 两条路都行（后端切换见 5.9，实际用法与结果见 3.8）
+# ① DashScope（原默认，需要 .env 里的 DASHSCOPE_API_KEY）
 .\.venv\Scripts\python.exe evaluation\run_ragas.py --mode real --name baseline
+
+# ② DeepSeek 当"生成 + 裁判" + 本地 bge 嵌入（本轮实际用法，不需要 DashScope）
+$env:CHAT_BACKEND='openai-compatible'
+.\.venv\Scripts\python.exe evaluation\run_ragas.py --mode real --name baseline ^
+    --judge-provider deepseek --embedding-backend local ^
+    --eval-set evaluation\eval_set_v2.jsonl --collection rag_local_corpus_c300_o30 --top-k 1
 
 # 离线自检（不需要 Key，验证流程可跑通，不烧 token）
 .\.venv\Scripts\python.exe evaluation\run_ragas.py --mode mock
@@ -177,7 +184,8 @@ cd D:\Projects\KnowledgeBase-RAG-LLM-System
 - [x] 评测集 29 条（20~30 条要求达成）
 - [x] 4 个指标全部接入 RAGAS（`faithfulness` / `answer_relevancy` / `context_recall` / `context_precision`）
 - [x] 对比表功能已就绪（阶段 3 直接复用）
-- [ ] **真实 RAGAS 分数** —— 阻塞在 `DASHSCOPE_API_KEY`，填入 `.env` 后执行 3.4 的第一条命令即可产出
+- [x] **真实 RAGAS 分数** —— ✅ **已于 2026-10-12 跑出**（生成/裁判切到 DeepSeek + 本地嵌入，**不需要 DashScope**），
+      结果、裁判噪声与"必须一起说的三点"见 **3.8**
 
 ### 3.7 踩到的坑（记录备查）
 
@@ -189,6 +197,60 @@ cd D:\Projects\KnowledgeBase-RAG-LLM-System
    需先 `$env:PYTHONUTF8='1'`（本次安装已用到）。
 
 ---
+
+### 3.8 真实 RAGAS 结果（2026-10-12 补跑）★ 阶段 2 的最终验收
+
+**怎么才跑得起来**：把**生成与裁判**后端都切到 OpenAI 兼容端点（DeepSeek），嵌入继续用**本地 bge**
+—— 于是**完全不需要 DashScope**。为此新增了 `config.chat_backend` 与 `--judge-provider deepseek`
+（改动见 5.9）。DashScope 的 `text-embedding-v4` / `qwen3-max` 路径**保持默认不变**。
+
+评测条件（三份报告都写在 `meta` 里，可逐项核对）：
+
+- 语料 `corpus/` 12 篇 / 215,062 字符；集合 `rag_local_corpus_c300_o30`（**真实分块 300/30**，从集合名解析后记录）
+- 评测集 36 题（`eval_set_v2.jsonl`）｜嵌入 local `bge-small-zh-v1.5` / 512 维
+- 生成 `deepseek-chat`｜裁判 `deepseek-chat`（**同源**，见下方口径提醒）
+- ★ **每个配置跑 2 次独立运行**，用于估计**裁判噪声**（RAGAS 的裁判也是 LLM）
+
+结果（baseline = 纯向量 `k=1`；optimized = `hybrid` `k=4` 候选 10）：
+
+| 指标 | baseline（两次） | optimized（两次） | Δ（两次） | 裁判噪声（组内极差） |
+|---|---|---|---|---|
+| **context_recall** | 0.2963 / 0.3380 | **0.7083 / 0.6806** | **+0.41 / +0.34** | ≤0.042 |
+| **faithfulness** | 0.3213 / 0.3687 | **0.5753 / 0.5373** | **+0.25 / +0.17** | ≤0.047 |
+| context_precision | 0.3611 / 0.4167 | 0.5440 / 0.5347 | +0.18 / +0.12 | ≤0.056 |
+| answer_relevancy | 0.7863 / 0.7759 | 0.7762 / 0.7715 | -0.01 / -0.00 | ≤0.010 |
+
+**能下的结论**（判据：Δ 必须大于裁判噪声，否则不下结论）
+
+1. ✅ **`context_recall` 大幅提升**（+0.34~0.41 ≫ 0.04）：`k` 从 1 提到 4 后，"该找到的资料"真的进了上下文
+2. ✅ **`faithfulness` 提升**（+0.17~0.25 ≫ 0.05）：拿到真资料后，答案更少脱离材料。
+   baseline 的 0.32 正好复现了那条因果链：**k=1 漏检 → 模型凭记忆答 → 忠实度低**（3.8 之前已在单题里逐字验证过一次）
+3. ⚠️ **弱成立**：`context_precision`（+0.12~0.18，两次都为正且大于噪声，但幅度明显小于前两项）
+4. ❌ **`answer_relevancy` 无变化**（-0.01 落在噪声内）—— 它衡量"答得切不切题"，
+   与"给多少资料"关系不大，**符合预期**，也算一次负向验证
+
+**必须一起说的三点**（否则这些数字会被误用）
+
+1. **同源裁判**：生成与裁判都是 `deepseek-chat` → 存在**自我偏好偏差**，分数可能偏高。
+   报告 `meta` 同时记 `chat_model` 与 `judge_model`，就是为了让这一点**可见**；
+   要中立需要第二个来源的裁判（本地 qwen2.5-1.5b 或另一个厂商）。
+2. ★ **裁判本身有噪声**（本轮新增的一层发现）：同一配置两次独立运行的极差达 **0.01~0.06**。
+   也就是说 **RAGAS 的对比也必须报波动范围** —— 和 IR 侧"噪声地板"是**同一个纪律**。
+   所以上表给的是 Δ 的**区间**，不是单次数字。
+3. **这个对比同时动了两个变量**（`k` 1→4 与 `vector`→`hybrid`），而 IR 侧已证明
+   vector 与 hybrid 在这份语料上**无法排序**（4.11.3）→ **增益主要来自 `k`**，
+   不能把功劳归给混合检索。
+
+**顺带修掉三处"报告在说谎"**（都是这次跑真实评测才暴露的）
+
+| 问题 | 原来 | 现在 |
+|---|---|---|
+| 裁判模型记错 | 记成 `qwen-plus`（命令行默认值），实际调用的是 `deepseek-chat` | 记**实际使用的**模型（`resolve_judge_model`） |
+| 分块记错 | 记成 config 默认的 `1000/100`，而集合是 `c300_o30` | 从**集合名解析真实分块**；解析不到写"未知"，不冒充 |
+| 分母缺失 | 没有 `n`，读者会以为 36 条全打上了分 | 逐指标记 `n`（实测 faithfulness **35/36**，单条打分失败会被跳过），并在报告里出警告 |
+
+产物：`evaluation/report_baseline.json`、`report_optimized.json`、`report_baseline_rep2.json`、
+`report_optimized_rep2.json`（重复运行）、`evaluation/REPORT_ragas.md`（对比表）。
 
 ## 四、阶段 3：检索优化 + A/B 对比
 
@@ -812,8 +874,10 @@ cd D:\Projects\KnowledgeBase-RAG-LLM-System
 - [x] 「改造前 vs 改造后」对比表能力（`report.py` 支持 1/N 份报告，且会拦截 k 不一致的对比）
 - [x] 对比实验的 k 已对齐（4.3 的修正表）
 - [x] `chunk_size` 对短文档失效的缺陷已修复（4.8）
-- [ ] **真实 `report_optimized.json` 与真实对比表** —— 阻塞在 `DASHSCOPE_API_KEY`
-- [ ] 混合检索 / 重排的真实收益数字 —— 必须 `--mode real` 才能测（离线替身下两路同源，见 4.3）
+- [x] **真实 `report_optimized.json` 与真实对比表** —— ✅ 见 **3.8**（表在 `evaluation/REPORT_ragas.md`）
+- [x] 混合检索 / 分块的真实收益数字 —— ✅ 见 3.8：`context_recall` +0.34~0.41、`faithfulness` +0.17~0.25，
+      但**增益主要来自 `k`**（1→4），不能归给混合检索（IR 侧已证明 vector 与 hybrid 无法排序）
+- [ ] **重排**的真实收益数字 —— **仍未测**：本轮 optimized 未开重排；重排要调 DashScope 的 rerank 接口
 
 ---
 
@@ -986,9 +1050,10 @@ INFO:     Uvicorn running on http://127.0.0.1:8020 (Press CTRL+C to quit)
 | 接入真实嵌入（`--embedding-backend dashscope\|local`，local 走本地 11434；按「后端 + 维度」隔离 collection） | ✅ | 5.6 / 5.7 |
 | 建 IR 指标（Hit Rate@k / MRR / Recall@k / nDCG@k / lift；确定性，不需 LLM 裁判） | ✅ | 4.10 / 4.11 / README |
 | **测试层 + CI**（98 条确定性单测；CI 只跑单测，不跑 IR/RAGAS） | ✅ | **5.8** |
-| 重排的真实收益数字 | ⏳ **等 `DASHSCOPE_API_KEY`** | 4.7 |
-| 真实 `report_optimized.json` 与真实对比表 | ⏳ 同上 | 3.6 / 4.7 |
-| 本地 LLM 替换云端（零成本对比） | ⬜ 未做（非阻塞） | — |
+| 真实 RAGAS 四指标 + 改造前后对比表 | ✅ **已完成**（DeepSeek 生成+裁判、本地嵌入，**不需要 DashScope**） | **3.8** |
+| 生成/裁判后端可切换（DeepSeek / 本地 11434） | ✅ 已完成（`config.chat_backend`） | **5.9** |
+| 重排的真实收益数字 | ⏳ **仍未测** —— 需 DashScope 的 rerank 接口（本轮 optimized 未开重排） | 4.7 |
+| 本地 LLM 当**生成**模型做零成本对比 | ⬜ 未做 —— 代码路径已就绪（`chat_backend`）；本机是 `qwen2.5-1.5b`，回答质量弱，未跑对比 | — |
 
 ### 5.6 本地嵌入服务接入规格（已实机核对，供第 3 步实施用）
 
@@ -1149,7 +1214,10 @@ def preflight_local():
 - ✅ **新有效**：元数据归因可用（修复缺陷 1 之后），这是 IR 指标的前置条件。
 - ⚠️ **仍不够**：上表只有 **3 个问题**，n=3 不构成统计结论；
   必须把 29 条评测集全跑一遍 + 上确定性 IR 指标，才能下"hybrid 优于纯 BM25"这类判断（第 4 步）。
-- ⚠️ **仍无效**：RAGAS 4 指标的真实数值（需要 LLM judge）；分块参数对比。
+- ⚠️ **已产出但必须带条件引用**：RAGAS 4 指标的真实数值（**3.8**）——
+  它是"DeepSeek 生成 + DeepSeek 裁判（同源）+ 本地 bge 嵌入"这一套配置下的结果，
+  且裁判本身有 0.01~0.06 的运行间噪声。引用时必须同时给出：裁判模型、同源性、两次运行的区间。
+  其中仍**不能**下的结论：`answer_relevancy` 的变化（落在噪声内）。
 
 ---
 
@@ -1197,7 +1265,7 @@ def preflight_local():
 | 不跑 | 原因 |
 |---|---|
 | **IR 评测** | IR 指标本身确定，但**向量腿不是**（HNSW 近似检索，跨进程候选集合会变，§4.10.5 / §4.11.2）。做成门禁会**随机变红** |
-| **RAGAS** | 4 个指标需要 LLM 裁判（`DASHSCOPE_API_KEY`），仓库里不存密钥 |
+| **RAGAS** | 4 个指标需要**外部 LLM 裁判**（Key 不进仓库），而且**裁判本身有运行间噪声**（3.8 实测 0.01~0.06）→ 当成门禁会随机变红 |
 
 这段声明由 `scripts/ci_summary.py` 写进**每个 job 的 summary**，并且有 9 条测试钉住它 ——
 **防止这句声明被删改之后，公开的绿勾被误读成"所有测试都过了"**。
@@ -1232,6 +1300,32 @@ $env:PYTHONUTF8='1'
 - **覆盖率统计**：没装 `pytest-cov`。不追求覆盖率数字 —— 上面每一条都是"改动容易踩回去"的地方，
   不是为凑数。
 - **端到端问答的自动化**：需要 `DASHSCOPE_API_KEY`，且与"IR 不进 CI"同一个理由（不稳定）。
+
+### 5.9 生成/裁判后端可切换（为了跑真实 RAGAS，顺带解掉"零成本对比"待办）
+
+**动机**：RAGAS 的 `faithfulness` / `answer_relevancy` 需要**真实生成的答案**（见 3.8）。
+生成与裁判都走"OpenAI 兼容端点"最省事 —— 于是任何厂商、以及本地服务都能换。
+
+| 位置 | 新增 | 默认值（**行为不变**） |
+|---|---|---|
+| `config_data.py` | `chat_backend` + `openai_compatible_base_url` / `_model` / `_api_key_env` | `dashscope`（通义千问），默认路径与改造前**完全一致** |
+| `rag.py` | `build_chat_model()` | dashscope → `ChatTongyi`；`openai-compatible` → `ChatOpenAI`（base_url 来自 config） |
+| `run_ragas.py` | `--judge-provider deepseek / openai-compatible` | `dashscope` |
+
+**跑真实评测时踩到并修掉的 3 类问题**（都是"一换厂商就炸"型，且**全部是 1 条冒烟跑抓出来的**）：
+
+| # | 现象 | 根因 |
+|---|---|---|
+| 1 | real 模式直接 `未找到 DASHSCOPE_API_KEY` | **生成侧**的 key 检查写死了变量名（裁判侧同款问题上一轮已修，生成侧漏了） |
+| 2 | `answer_relevancy` 整列 **N/A**，其它 3 个指标照常 | ragas 的 `answer_relevancy` 默认 `strictness=3`（一次要 3 个补全），而 **DeepSeek 只支持 `n=1`** → 400 |
+| 3 | 报告把 `judge_model` 记成 `qwen-plus`，而实际调用的是 `deepseek-chat` | 记的是命令行原始值，不是**实际调用**的模型 |
+
+**修法**：① `require_chat_key()` / `require_judge_key()` 按后端给出**准确的变量名**；
+② `apply_judge_compat()` 在不支持 `n>1` 的来源上把 `strictness` 降到 1；
+③ `resolve_judge_model()` 记实际使用的模型。三者都有单测（`tests/test_chat_backend.py`，共 19 条）。
+
+★ 这三条的共同教训：**"缺 Key / 参数默认值"这类地方最容易写死厂商**。
+而"先跑 1 条冒烟再跑全量"让它们在**花掉全量额度之前**就暴露了 —— 这条纪律值一次单独记录。
 
 ### 6.1 有效产出（可以作为结论）
 
@@ -1331,6 +1425,12 @@ $env:PYTHONUTF8='1'
 - ❌ 不要把 4.3 / 4.4 的任何数字写成「RAGAS 指标」——
   mock 模式下 4 个指标全是**字符二元组重叠率**，与 RAGAS 官方算法无关（逐条口径见报告的「指标口径说明」小节）。
 - ❌ 不要把 4.3 / 4.4 的数字写进 README 的「结论 / 效果」区，也不要写进简历。
+- ✅ **可以**引用 **3.8 的真实 RAGAS 数值**，但**必须同时**注明三件事：裁判模型（`deepseek-chat`）、
+  **生成与裁判同源**（自我偏好偏差）、**两次独立运行的区间**（裁判噪声 0.01~0.06）。
+  只说一个数字就是误用。
+- ❌ 不要引用 3.8 里 `answer_relevancy` 的变化（-0.01，落在裁判噪声内 = 等于没变）。
+- ❌ 不要把 3.8 的提升归因给"混合检索" —— 那次对比**同时改了 `k`**（1→4），
+  而 IR 侧已证明 vector 与 hybrid 在这份语料上无法排序（4.11.3）。
 - ✅ 可以写的是：改了哪些代码、修了哪些缺陷、建了哪些机制、以及客观的片段数与耗时统计。
 
 ---
