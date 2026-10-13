@@ -252,6 +252,45 @@ $env:CHAT_BACKEND='openai-compatible'
 产物：`evaluation/report_baseline.json`、`report_optimized.json`、`report_baseline_rep2.json`、
 `report_optimized_rep2.json`（重复运行）、`evaluation/REPORT_ragas.md`（对比表）。
 
+### 3.9 同源偏差有多大（2026-10-13 补：换一个「非 DeepSeek」裁判复评）★
+
+**动机**：3.8 的生成与裁判**都是 `deepseek-chat`** —— 模型在给自己打分（自我偏好偏差）。
+量化它的唯一干净做法：**固定同一批生成答案，只换裁判**（`--reuse`，答案一个字都不重生成）。
+
+**做法**：复用 3.8 的两份 run 明细，裁判由 `deepseek-chat` 换成 **DashScope `qwen-plus`**（不同厂商）。
+
+| 指标 | DeepSeek 裁判（同源） | qwen-plus 裁判（异源） | 绝对值差 |
+|---|---|---|---|
+| `faithfulness` | 0.3213 | 0.3507 | +0.029 |
+| `answer_relevancy` | **0.7863** | **0.6117** | **−0.175** |
+| `context_recall` | 0.2963 | 0.3857 | +0.089 |
+| `context_precision` | 0.3611 | 0.4722 | +0.111 |
+
+再比 `optimized − baseline` 的 **Δ 在两套裁判下同不同向**：
+
+| Δ | DeepSeek 裁判 | qwen-plus 裁判 | 判定 |
+|---|---|---|---|
+| `context_recall` | +0.412 | +0.377 | ✅ 一致（差 0.035） |
+| `faithfulness` | +0.254 | +0.236 | ✅ 一致（差 0.018） |
+| `context_precision` | +0.183 | +0.352 | ⚠️ 差 0.169 |
+| `answer_relevancy` | −0.010 | +0.079 | ❌ 方向相反 |
+
+**能说的**：
+1. **同源偏差不均匀**：`context_recall` / `faithfulness` 的结论换裁判后几乎不动（差 ≤0.04）
+   → 3.8 里那两条结论**稳健**，可以引用。
+2. **`answer_relevancy` 是重灾区**：DeepSeek 自评比 qwen-plus **系统性高约 0.175**，
+   且在自评下"改造前后等于没变"（−0.01），换裁判后成了一个正变化（+0.079）。
+   → 6.3 的用词红线依旧成立，且理由从"落在噪声内"升级为"**同源偏差最大的一项**"。
+
+**不能说的**：谁「更对」。两个裁判的评分尺度本就不同，这里量化的是**偏差幅度**，不是真值；
+且这是单次运行，裁判自身还有 0.01~0.06 的运行间噪声（3.8）。
+
+产物：`evaluation/report_baseline_judgeqwen.json`、`report_optimized_judgeqwen.json`。
+复现：`--reuse <run.jsonl> --judge-provider dashscope --judge-model qwen-plus --embedding-backend local`
+（注意：qwen 裁判下 `context_recall` 有效样本为 35/36，1 条打分失败已记入 `meta`。）
+
+---
+
 ## 四、阶段 3：检索优化 + A/B 对比
 
 ### 4.1 新增内容
@@ -828,6 +867,41 @@ $env:CHAT_BACKEND='openai-compatible'
 
 所以要读成"**≈3 题**"而不是"3.00 题"；要正式下结论建议 `--repeat 5`。
 
+### 4.12 重排的真实收益（2026-10-13 补，DashScope Key 已配）★
+
+**此前为什么没测**：`gte-rerank-v2` 是 DashScope 云端接口，而 `.env` 的 `DASHSCOPE_API_KEY` 一直空着；
+且 IR 侧原本**写死 `reranker=None`**（`run_ir.py`），报告 `meta.retrieval.rerank` 也是**写死的 `False`**
+（属"报告撒谎"型隐患）。本次先补上 IR 侧重排接入（新增 `--rerank / --no-rerank`，`meta` 记真实
+`rerank` 与 `rerank_model`，`--repeat` 时把开关显式传给子进程），再开测。
+
+**配置**：`hybrid`，`k=4`，候选 10，分块 300/30，local bge 512 维，36 题，**各 3 个独立进程**取均值。
+唯一变量：重排 开 / 关（`gte-rerank-v2`）。
+
+| 指标 | 口径性质 | 重排关 | 重排开 | Δ | 该行地板（关） | 倍数 |
+|---|---|---|---|---|---|---|
+| `kw_precision@1` | **无嵌入对抗口径** | 0.5741 | **0.7500** | +0.1759 | 0.0277 | **6.4×** |
+| `kw_precision@3` | 无嵌入对抗口径 | 0.5432 | **0.6235** | +0.0803 | 0.0186 | **4.3×** |
+| `doc_hit_rate@1` | 文档级（无循环） | 0.6204 | **0.7500** | +0.1296 | 0.0556 | **2.3×** |
+| `chunk_precision@3` | 弱标注（嵌入同源） | 0.6173 | **0.6698** | +0.0525 | 0.0277 | **1.9×** |
+| `chunk_recall@5` | 弱标注 | 0.0766 | 0.0756 | −0.0010 | 0.0029 | ❌ 噪声内 |
+
+**结论（可进结论区）**：
+
+> 开启 `gte-rerank-v2` 后，top-k 排序质量在**三种互不相同的标注口径下一致提升**
+> （文档级 / 无嵌入对抗口径 / 嵌入同源弱标注），提升幅度是各自噪声地板的 **1.9~6.4 倍**。
+> 其中**刻意不含嵌入、无循环性**的 `kw_*` 提升最大（+6.3 题 / +2.9 题），
+> 说明这个增益**不是「嵌入同源」造成的**。
+
+**附带发现（同样可引用）**：重排把该配置的**噪声地板从 2.1 题 / 36 压到 0.3 题 / 36**。
+机制：噪声来自向量腿的 HNSW 近似检索（4.10.5），而 rerank 是对**已召回候选**做确定性云端打分 ——
+它把候选排成一个与"候选集合扰动"基本无关的稳定顺序，于是跨进程差异被大幅吸收。
+
+> ⚠️ 但不能说成"重排消除了不确定性"：**候选集合本身仍会变**，只是 top-k 名次对集合扰动不再敏感。
+> 且这是**该配置各自的属性**（与 4.11.1 一致），不能外推。
+
+**不能说**：① `chunk_recall@5` 的变化（−0.001，噪声内）；②"重排一定划算"——本次没测**成本**
+（每问一次多一次云端调用与延迟）。
+
 ### 4.5 这一步挖出来的问题
 
 1. **`max_spliter_char_number = 1000` 让"调小 chunk_size"对短文档完全无效** —— 已修复，见 4.8。
@@ -877,7 +951,7 @@ cd D:\Projects\KnowledgeBase-RAG-LLM-System
 - [x] **真实 `report_optimized.json` 与真实对比表** —— ✅ 见 **3.8**（表在 `evaluation/REPORT_ragas.md`）
 - [x] 混合检索 / 分块的真实收益数字 —— ✅ 见 3.8：`context_recall` +0.34~0.41、`faithfulness` +0.17~0.25，
       但**增益主要来自 `k`**（1→4），不能归给混合检索（IR 侧已证明 vector 与 hybrid 无法排序）
-- [ ] **重排**的真实收益数字 —— **仍未测**：本轮 optimized 未开重排；重排要调 DashScope 的 rerank 接口
+- [x] **重排**的真实收益数字 —— ✅ 见 **4.12**（`hybrid` 开/关各 3 个独立进程；三口径一致提升，为各自噪声地板的 1.9~6.4 倍）
 
 ---
 
@@ -1049,10 +1123,11 @@ INFO:     Uvicorn running on http://127.0.0.1:8020 (Press CTRL+C to quit)
 | d) CHANGES 划定「有效产出 / 暂无效结论」两栏 | ✅ | 六 |
 | 接入真实嵌入（`--embedding-backend dashscope\|local`，local 走本地 11434；按「后端 + 维度」隔离 collection） | ✅ | 5.6 / 5.7 |
 | 建 IR 指标（Hit Rate@k / MRR / Recall@k / nDCG@k / lift；确定性，不需 LLM 裁判） | ✅ | 4.10 / 4.11 / README |
-| **测试层 + CI**（98 条确定性单测；CI 只跑单测，不跑 IR/RAGAS） | ✅ | **5.8** |
+| **测试层 + CI**（119 条确定性单测；CI 只跑单测，不跑 IR/RAGAS） | ✅ | **5.8** |
 | 真实 RAGAS 四指标 + 改造前后对比表 | ✅ **已完成**（DeepSeek 生成+裁判、本地嵌入，**不需要 DashScope**） | **3.8** |
 | 生成/裁判后端可切换（DeepSeek / 本地 11434） | ✅ 已完成（`config.chat_backend`） | **5.9** |
-| 重排的真实收益数字 | ⏳ **仍未测** —— 需 DashScope 的 rerank 接口（本轮 optimized 未开重排） | 4.7 |
+| 重排的真实收益数字 | ✅ **已测**（DashScope Key 已配；`hybrid` 开/关各 3 个独立进程；IR 侧已接入 `--rerank`） | **4.12** |
+| 同源偏差有多大 | ✅ **已测**（`--reuse` 固定答案，裁判 DeepSeek vs `qwen-plus`） | **3.9** |
 | 本地 LLM 当**生成**模型做零成本对比 | ⬜ 未做 —— 代码路径已就绪（`chat_backend`）；本机是 `qwen2.5-1.5b`，回答质量弱，未跑对比 | — |
 
 ### 5.6 本地嵌入服务接入规格（已实机核对，供第 3 步实施用）
@@ -1239,21 +1314,23 @@ def preflight_local():
 §5.2 结尾已经把教训写成一句话："必须靠导入全量模块的冒烟测试兜住"。
 本节就是把那句话变成**真正的测试**，并把 CI 建起来。
 
-#### 5.8.2 98 条确定性测试（不联网 / 不需要 Key / 不需要本地嵌入服务）
+#### 5.8.2 119 条确定性测试（不联网 / 不需要 Key / 不需要本地嵌入服务）
 
 | 测试文件 | 条数 | 钉住什么 |
 |---|---|---|
 | `tests/test_hygiene.py` | 8 | 配置路径必须绝对（换目录启动会读写到不同向量库）；**废弃配置不得复活**；代码里的 `CHANGES §x.y` 必须真有这一节；`.env` / 向量库 / 评测中间产物必须被 git 忽略 |
 | `tests/test_chunking_and_extract.py` | 9 | ★ **chunk_size 对短文档失效**那个缺陷的回归（150 → 2 片段、1000 → 1 片段）；txt 的 utf-8/gbk 回退；PDF 走 pypdf；MD5 去重仍生效 |
 | `tests/test_retrievers.py` | 16 | ★ 单路检索**必须仍截断到 k**（曾因短路优化返回 `candidate_k` 条，静默改变基线）；并列时排序由**内容指纹**决定（与返回顺序无关）；BM25 命中/过滤；重排无 Key 时降级不崩 |
-| `tests/test_report_guardrails.py` | 12 | ★ 噪声地板取值口径 + **两级自动标注**（整行不可排序 / 仅首末噪声内）；四项口径拦截（`k` / `candidate_k` / 后端+维度 / 重排） |
+| `tests/test_report_guardrails.py` | 13 | ★ 噪声地板取值口径 + **两级自动标注**（整行不可排序 / 仅首末噪声内）；四项口径拦截（`k` / `candidate_k` / 后端+维度 / 重排） |
 | `tests/test_merge_reports.py` | 6 | ★ headline 噪声地板**不得被 `lift` 这类大量纲指标带跑偏**（曾算出"11.5 题 / 6"） |
 | `tests/test_import_smoke.py` | 12 | ★ **§5.2 那个致命 ImportError 的固化回归**：全部模块能 import + `RagService` 能构造 + 正确导入路径有效 |
 | `tests/test_ir_metrics.py` | 17 | `precision@k` 分母恒为 k；`lift` 换算；`base_rate` 不除零；三种口径文本必须自带"偏袒谁 / 有无循环性" |
 | `tests/test_dataset.py` | 9 | 评测集结构校验；`answer_keywords` 必须真能在**来源文档**里找到（否则对抗口径**静默全 0**） |
+| `tests/test_chat_backend.py` | 20 | ★ 生成/裁判侧**不许写死厂商**（§5.9 的三类问题）：缺 Key 的变量名按后端解析、`n>1` 不支持时把 `strictness` 降到 1、报告记**实际调用**的模型名 |
 | `tests/test_ci_summary.py` | 9 | CI summary 统计正确，且**"不跑 IR / 不跑 RAGAS"的声明不可腐化** |
 
-本地跑：`python -m pytest` → **98 passed, 约 4 秒**。
+本地跑：`python -m pytest` → **119 passed, 约 7 秒**（2026-10-13 逐文件核对；
+此前文档写「98 条」是漏记 `test_chat_backend.py` 20 条 + `test_report_guardrails.py` 少记 1 条所致）。
 
 #### 5.8.3 CI：跑什么、**不跑什么**（这是本次最容易做错的地方）
 
@@ -1295,11 +1372,58 @@ $env:PYTHONUTF8='1'
 .\.venv\Scripts\python.exe scripts\ci_summary.py junit.xml
 ```
 
-#### 5.8.6 仍未做的（如实列出）
+#### 5.8.6 原「仍未做的」清单（2026-10-13 全部补齐）
 
-- **覆盖率统计**：没装 `pytest-cov`。不追求覆盖率数字 —— 上面每一条都是"改动容易踩回去"的地方，
-  不是为凑数。
-- **端到端问答的自动化**：需要 `DASHSCOPE_API_KEY`，且与"IR 不进 CI"同一个理由（不稳定）。
+- ~~**覆盖率统计**~~：**已补**（装 `pytest-cov`），实测 TOTAL 45%，见 **5.8.7**。
+- ~~**端到端问答的自动化**~~：**已补** —— `scripts/e2e_smoke.py`（真检索 + 真生成），见 **5.8.8**。
+
+#### 5.8.8 端到端问答冒烟（2026-10-13 补）
+
+**它补的是 pytest 测不到的那一段**：119 条单测只证明「模块能 import、`RagService` 能构造」
+（`test_import_smoke.py`），**不能证明真问一句会有答案**。本脚本跑完整链路（检索 → 提示词 → 生成）。
+
+```powershell
+$env:CHAT_BACKEND='openai-compatible'      # 生成走 DeepSeek，不需要 DashScope
+$env:EMBEDDING_BACKEND='local'             # 嵌入走本地 11434（先 .\svc.ps1 start llm）
+.\.venv\Scripts\python.exe scripts\e2e_smoke.py --limit 3 --collection rag_local_corpus_c300_o30 --top-k 4
+```
+
+- **断言**：每条答案非空、且命中至少 `--min-contexts`（默认 1）段依据；任一条失败 → 退出码 1。
+- **不进 CI**（需要真 Key + 联网，会随机变红）—— 与「IR / RAGAS 不进 CI」同一个理由；
+  **也因此不放进 `tests/`**（不污染那 119 条）。
+- 实测（2026-10-13，DeepSeek 生成 + 本地嵌入，36 题集前 2 条）：`[PASS] intro-02 答案 183 字 / 依据 4 段 / 1.33s`。
+
+#### 5.8.7 覆盖率统计（2026-10-13 补）
+
+**为什么补**：覆盖率不是门禁，是一面镜子 —— 用它看"哪些路径其实没人测"。刻意**不设阈值**（设了就会有人写凑数测试）。
+
+命令（不需要 Key / 不联网；逐模块指定 source，避免把 `.venv` 扫进来）：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest --cov=retrievers --cov=rag --cov=config_data --cov=embeddings --cov=vector_stores --cov=knowledge_base --cov=file_history_store --cov=server --cov=evaluation --cov=scripts --cov-report=term-missing
+```
+
+实测（2026-10-13，`119 passed, 1 warning`）：
+
+| 模块 | 覆盖 | 读法 |
+|---|---|---|
+| `config_data.py` | **100%** | 纯配置 |
+| `evaluation/ir_metrics.py` | **99%** | 结论都靠它算 |
+| `scripts/ci_summary.py` | **96%** | CI 声明不可腐化 |
+| `knowledge_base.py` | **94%** | 切分 / 去重缺陷回归的功劳 |
+| `evaluation/dataset.py` | 83% | |
+| `retrievers.py` | 75% | 缺的多是重排联网分支（无 Key 时走降级） |
+| `evaluation/report.py` | 69% | |
+| `vector_stores.py` | 69% | |
+| `rag.py` | 66% | |
+| `server.py` | 50% | 缺的正是必须真 Key 的 `/chat` 上游路径 |
+| `evaluation/run_ragas.py` | 35% | 同因（需 Key） |
+| `embeddings.py` | 29% | 主要是 dashscope 分支（本机无 Key） |
+| `evaluation/offline.py`、`build_eval_set.py`、`scripts/build_corpus.py` | 0% | 一次性脚本 / 替身，未纳入单测 |
+| **TOTAL** | **45%** | 2042 语句 / 1123 未覆盖 |
+
+> 低覆盖**不等于没测**：`server.py` 缺的那一半正是必须真 Key 的路径 —— 与"IR / RAGAS 不进 CI"同一个理由。
+> **别为把数字做高而写没有断言价值的测试。**
 
 ### 5.9 生成/裁判后端可切换（为了跑真实 RAGAS，顺带解掉"零成本对比"待办）
 
@@ -1322,7 +1446,7 @@ $env:PYTHONUTF8='1'
 
 **修法**：① `require_chat_key()` / `require_judge_key()` 按后端给出**准确的变量名**；
 ② `apply_judge_compat()` 在不支持 `n>1` 的来源上把 `strictness` 降到 1；
-③ `resolve_judge_model()` 记实际使用的模型。三者都有单测（`tests/test_chat_backend.py`，共 19 条）。
+③ `resolve_judge_model()` 记实际使用的模型。三者都有单测（`tests/test_chat_backend.py`，共 20 条）。
 
 ★ 这三条的共同教训：**"缺 Key / 参数默认值"这类地方最容易写死厂商**。
 而"先跑 1 条冒烟再跑全量"让它们在**花掉全量额度之前**就暴露了 —— 这条纪律值一次单独记录。
@@ -1354,7 +1478,10 @@ $env:PYTHONUTF8='1'
 | 21 | **负结果（有价值）**：确定性 tie-break 改造消不掉噪声 —— 改造后"仅顺序不同"= 0 题、"集合不同"= 24 题，证明只能披露 | 24/36 题集合级差异，且查询向量跨进程逐位一致 | 4.11.2 |
 | 22 | 用 3 次均值刷新两张表，并把结论**三层收口**：噪声层（"余量充足"→分档）+ **口径层**（`chunk_*` 6 行是嵌入同源、不算独立证据，只有 `kw_*` 2 行能进结论区）+ **估计层**（两个 `@1` 余量 1.35~1.43× 小于地板自身 1.5× 不确定度，也不进） | 结论区最终只剩 1 句 | 4.11.3 |
 | 23 | **报数纠错**：4.11.1 初版"35 行 / 4 行"是从**过滤后的终端输出**里数的（与 4.10.5 混入 `candidate_k=32` 属同类错误）；同时明确机制边界 —— 它筛噪声、**筛不了口径质量** | 逐行数源表：39 = 5 + 26 + 8 | 4.11.1 |
-| 24 | **补齐测试层：98 条确定性单测**，其中包含 §5.2 那个**致命 ImportError** 的固化回归（此前只写在文档里的一句话命令）、`chunk_size` 缺陷回归、单路截断回归、噪声地板标注回归 | `python -m pytest` → 98 passed，约 4 秒 | 5.8.2 |
+| 24 | **补齐测试层：119 条确定性单测**，其中包含 §5.2 那个**致命 ImportError** 的固化回归（此前只写在文档里的一句话命令）、`chunk_size` 缺陷回归、单路截断回归、噪声地板标注回归 | `python -m pytest` → 119 passed，约 7 秒 | 5.8.2 |
+| 26 | **报数纠错 + 覆盖率统计**：文档此前写「98 条」单测，逐文件核对实为 **119 条**（漏记 `test_chat_backend.py` 20 条、`test_report_guardrails.py` 少记 1 条）；并补上覆盖率（只做"看得见"，不设门槛） | `pytest --collect-only` 逐文件数；`pytest --cov` → **TOTAL 45%**（2042 语句 / 1123 未覆盖） | 5.8.2 / 5.8.7 |
+| 27 | **重排的真实收益**（DashScope Key 配好后补测）：`hybrid` 开/关各 3 个独立进程，**三个互不相同口径一致提升**（文档级 / 无嵌入对抗 / 嵌入同源），幅度为各自噪声地板的 **1.9~6.4 倍**；无嵌入口径提升最大；且重排把该配置噪声地板从 2.1 题压到 0.3 题 | 9 个独立进程实测；IR 侧新接入 `--rerank` | 4.12 |
+| 28 | **同源偏差已量化**：固定同一批答案、只换裁判（DeepSeek → qwen-plus），证明 `context_recall` / `faithfulness` 结论**跨裁判稳健**（差 ≤0.04），而 `answer_relevancy` 自评**系统性偏高约 0.175** 并掩盖了一个正变化 | `--reuse` 同源对比；两套裁判各 36 题 | 3.9 |
 | 25 | **CI 建成，且把"不跑什么"写进 job summary**：IR 不进 CI（向量腿会随机变红）、RAGAS 不进 CI（需 Key）；这段声明由脚本生成并有 9 条测试钉住，防它腐化后被误读成"全都过了" | `.github/workflows/tests.yml` + `scripts/ci_summary.py` + `tests/test_ci_summary.py` | 5.8.3 |
 
 这 25 条的共同点：**结论都配了可复现的证据，并且把局限写在结论旁边。**
@@ -1429,6 +1556,10 @@ $env:PYTHONUTF8='1'
   **生成与裁判同源**（自我偏好偏差）、**两次独立运行的区间**（裁判噪声 0.01~0.06）。
   只说一个数字就是误用。
 - ❌ 不要引用 3.8 里 `answer_relevancy` 的变化（-0.01，落在裁判噪声内 = 等于没变）。
+  **2026-10-13 补充（3.9）**：该指标同时是**同源偏差最严重**的一项 —— DeepSeek 自评比 `qwen-plus`
+  系统性高约 0.175，且把正变化压成了"没变化"。理由从"噪声内"升级为"**同源偏差重灾区**"。
+- ✅ **可以**引用 4.12 的重排收益（三口径一致、幅度为地板的 1.9~6.4 倍），
+  但要连带说明：**未测重排的成本/延迟**，且"噪声地板被压低"是该配置各自的属性、不可外推。
 - ❌ 不要把 3.8 的提升归因给"混合检索" —— 那次对比**同时改了 `k`**（1→4），
   而 IR 侧已证明 vector 与 hybrid 在这份语料上无法排序（4.11.3）。
 - ✅ 可以写的是：改了哪些代码、修了哪些缺陷、建了哪些机制、以及客观的片段数与耗时统计。

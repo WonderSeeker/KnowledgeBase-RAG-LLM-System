@@ -7,3 +7,7 @@
 # 跑测试：
 #   .\.venv\Scripts\python.exe -m pytest
 pytest==8.3.3
+
+# 覆盖率统计（2026-10-13 补，见 CHANGES §5.8.7）
+# 用途是"看见哪些路径没人测"，不是设门禁 —— 门槛会诱导写凑数的测试。
+pytest-cov==7.1.0

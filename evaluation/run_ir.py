@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import subprocess
 import sys
 import time
@@ -60,7 +61,7 @@ from chroma_quiet import CHROMA_SETTINGS                           # noqa: E402
 from dataset import EvalItem, load_eval_set, summarize             # noqa: E402
 from experiments import collection_name_for, ingest_collection      # noqa: E402
 from report import render                                          # noqa: E402
-from retrievers import BM25Retriever, VectorRetriever, build_retriever, load_all_documents  # noqa: E402
+from retrievers import BM25Retriever, DashScopeReranker, VectorRetriever, build_retriever, load_all_documents  # noqa: E402
 
 REPORTS_DIR = EVAL_DIR / "reports"
 K_VALUES = (1, 3, 5)
@@ -82,7 +83,8 @@ def cosine(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b) if norm_a and norm_b else 0.0
 
 
-def build_retriever_for(method: str, collection: str, top_k: int, candidate_k: int):
+def build_retriever_for(method: str, collection: str, top_k: int, candidate_k: int,
+                        rerank: bool = False):
     """按检索策略构造检索器，并返回实际运行环境（写进报告 meta）"""
     profile, embeddings, dim = embeddings_module.prepare(config.embedding_backend)
     from vector_stores import VectorStoreService
@@ -91,9 +93,12 @@ def build_retriever_for(method: str, collection: str, top_k: int, candidate_k: i
 
     corpus = load_all_documents(service.vector_store)
     vector_leg = VectorRetriever(service, k=candidate_k) if method in ("vector", "hybrid") else None
+    # 重排是可选项：无 Key / 网络不通时 DashScopeReranker 会**降级为粗排顺序**并打警告，
+    # 不会让评测挂掉 —— 但那样测出来的就不是"带重排"的效果，跑完必须看日志确认没降级。
+    reranker = DashScopeReranker() if rerank else None
     retriever = build_retriever(
         method, vector_leg=vector_leg, documents=corpus, k=top_k,
-        candidate_k=candidate_k, rrf_k=config.rrf_k, reranker=None,
+        candidate_k=candidate_k, rrf_k=config.rrf_k, reranker=reranker,
     )
     run_env = {
         "collection": collection,
@@ -101,6 +106,7 @@ def build_retriever_for(method: str, collection: str, top_k: int, candidate_k: i
         "embedding_model": profile.model,
         "embedding_dim": dim,
         "corpus_chunks": len(corpus),
+        "rerank": bool(rerank),
     }
     return retriever, run_env
 
@@ -188,8 +194,9 @@ def build_keyword_labels(items: list[EvalItem], chunk_ids: list[str],
 
 # --------------------------------------------------------------------------- 单组评测
 def evaluate_one(items: list[EvalItem], method: str, collection: str, top_k: int,
-                 candidate_k: int, threshold: float) -> tuple[dict, list[dict], dict, dict]:
-    retriever, run_env = build_retriever_for(method, collection, top_k, candidate_k)
+                 candidate_k: int, threshold: float,
+                 rerank: bool = False) -> tuple[dict, list[dict], dict, dict]:
+    retriever, run_env = build_retriever_for(method, collection, top_k, candidate_k, rerank)
 
     doc_rankings: list[list[str]] = []
     chunk_rankings: list[list[str]] = []
@@ -354,6 +361,8 @@ def run_repeats(args, configs, methods, backend: str, top_k: int, candidate_k: i
             cmd += ["--corpus", args.corpus]
         if args.limit:
             cmd += ["--limit", str(args.limit)]
+        if args.rerank:
+            cmd.append("--rerank")             # 重排开关必须显式传给子进程，否则重复测量里它悄悄关掉
         if args.no_ingest or i > 1:
             cmd.append("--no-ingest")           # 第 1 个进程负责入库，其余复用同一集合
         print(f"\n[IR] --- 第 {i}/{n} 次（独立进程）---")
@@ -403,6 +412,10 @@ def main() -> int:
     parser.add_argument("--retriever", default=None, help="只跑单一检索策略")
     parser.add_argument("--top-k", type=int, default=None, help="交给下游的片段数（对比时必须固定）")
     parser.add_argument("--candidate-k", type=int, default=None, help="粗排候选数")
+    parser.add_argument("--rerank", dest="rerank", action="store_true", default=None,
+                        help="开启 DashScope 重排（gte-rerank-v2）；需 DASHSCOPE_API_KEY")
+    parser.add_argument("--no-rerank", dest="rerank", action="store_false",
+                        help="关闭重排（默认）")
     parser.add_argument("--embedding-backend", choices=["dashscope", "local"], default=None)
     # ★ 不要收紧这个阈值（默认 0.6 是刻意保留的，不是"没调好"）
     #   收紧的收益：基准率下降 → lift 的区分度上升；
@@ -431,6 +444,10 @@ def main() -> int:
     config.embedding_backend = backend
     top_k = args.top_k if args.top_k is not None else config.retrieve_k
     candidate_k = args.candidate_k if args.candidate_k is not None else config.candidate_k
+    rerank = config.rerank_enabled if args.rerank is None else args.rerank
+    if rerank and not os.environ.get("DASHSCOPE_API_KEY"):
+        print("[IR] 警告：开启了重排但没有 DASHSCOPE_API_KEY —— DashScopeReranker 会降级为粗排顺序，"
+              "本轮数字并不代表「带重排」的效果。")
 
     items = load_eval_set(Path(args.eval_set))
     if args.limit:
@@ -442,6 +459,7 @@ def main() -> int:
     print(f"[IR] 检索维度：{'，'.join(m or '（默认）' for m in methods)}")
     print(f"[IR] 语料目录：{corpus_dir or 'assets（默认）'}  集合标记：{corpus_tag or '（无）'}")
     print(f"[IR] 片段级弱标注阈值：{args.sim_threshold}（0 = 关闭）")
+    print(f"[IR] 重排：{'开（' + config.rerank_model + '）' if rerank else '关'}")
     print(summarize(items), sep="\n")
     print("=" * 78)
 
@@ -469,7 +487,7 @@ def main() -> int:
                         + (f"_{method}" if method else ""))
             print(f"\n{'-' * 78}\n[IR] 评测 {run_name}\n{'-' * 78}")
             metrics, per_question, run_env, caliber = evaluate_one(
-                items, method, collection, top_k, candidate_k, args.sim_threshold
+                items, method, collection, top_k, candidate_k, args.sim_threshold, rerank
             )
 
             report = {
@@ -485,7 +503,8 @@ def main() -> int:
                         "top_k": top_k,
                         "candidate_k": candidate_k,
                         "rrf_k": config.rrf_k if method == "hybrid" else None,
-                        "rerank": False,
+                        "rerank": run_env["rerank"],
+                        "rerank_model": config.rerank_model if run_env["rerank"] else None,
                         "chunk_size": chunk_size,
                         "chunk_overlap": chunk_overlap,
                         "corpus_chunks": run_env["corpus_chunks"],

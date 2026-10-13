@@ -363,7 +363,42 @@ baseline = 纯向量 `k=1`；optimized = `hybrid` `k=4`（候选 10）。
   而 IR 侧已证明 vector 与 hybrid 在这份语料上**无法排序**（见结论 1 上一节）。
 - ⚠️ **必须连带说明**：裁判与生成**同源**（自我偏好偏差，分数可能偏高）；
   **裁判本身有 0.01~0.06 的运行间噪声**，所以这里给的是**区间**而非单次数字；
-  要中立需要一个第二来源的裁判。（faithfulness 有效样本 35/36，1 条打分失败已如实记入 `meta`。）
+  要中立需要一个第二来源的裁判（**2026-10-13 已补**，见结论 5）。
+  （faithfulness 有效样本 35/36，1 条打分失败已如实记入 `meta`。）
+
+#### 结论 4（2026-10-13 补，真实重排）：开重排后 top-k 排序质量三口径一致提升
+
+配置：`hybrid` `k=4` 候选 10 / 分块 300/30 / 36 题，**各 3 个独立进程**；唯一变量是重排开/关（`gte-rerank-v2`）。
+
+| 指标 | 口径性质 | 关 | 开 | Δ | 地板（关） | 倍数 |
+|---|---|---|---|---|---|---|
+| `kw_precision@1` | **无嵌入对抗口径** | 0.5741 | **0.7500** | +0.176 | 0.028 | **6.4×** |
+| `kw_precision@3` | 无嵌入对抗口径 | 0.5432 | **0.6235** | +0.080 | 0.019 | **4.3×** |
+| `doc_hit_rate@1` | 文档级（无循环） | 0.6204 | **0.7500** | +0.130 | 0.056 | **2.3×** |
+| `chunk_precision@3` | 弱标注（嵌入同源） | 0.6173 | **0.6698** | +0.053 | 0.028 | **1.9×** |
+
+- ✅ **能说**：三种互不相同的标注口径**一致提升**，幅度为各自噪声地板的 1.9~6.4 倍；
+  **无嵌入的对抗口径提升最大** → 这个增益不是「嵌入同源」的产物。
+- ✅ **附带发现**：重排把该配置的噪声地板从 **2.1 题 → 0.3 题**（rerank 是确定性的云端打分，
+  吸收了向量腿的跨进程扰动；但**候选集合本身仍会变**，不等于"消除了不确定性"）。
+- ❌ **不能说**：`chunk_recall@5` 的变化（落在噪声内）；"重排一定划算"（没测它的成本/延迟）。
+- 细节与边界见 `CHANGES.md §4.12`。
+
+#### 结论 5（2026-10-13 补，同源偏差）：自评偏差不均匀，`answer_relevancy` 最严重
+
+固定同一批答案（`--reuse`，答案一个字都不重生成），只把裁判从 `deepseek-chat` 换成 `qwen-plus`：
+
+| Δ（optimized − baseline） | DeepSeek 裁判（同源） | qwen-plus 裁判（异源） | |
+|---|---|---|---|
+| `context_recall` | +0.412 | +0.377 | ✅ 一致 |
+| `faithfulness` | +0.254 | +0.236 | ✅ 一致 |
+| `context_precision` | +0.183 | +0.352 | ⚠️ 差 0.17 |
+| `answer_relevancy` | −0.010 | +0.079 | ❌ 方向相反 |
+
+- ✅ **能说**：`context_recall` / `faithfulness` 的结论**跨裁判稳健**（差 ≤0.04）→ 上面结论 3 可放心引用。
+- ⚠️ **`answer_relevancy` 是重灾区**：同源自评**系统性高约 0.175**，还把正变化压成了"没变化"
+  → 该指标的数值不可引用（与下方 6.3 红线一致，理由从"噪声内"升级为"**同源偏差最严重**"）。
+- 细节见 `CHANGES.md §3.9`。
 
 #### ❌ 不能说：vector 与 hybrid 谁更好
 
@@ -419,7 +454,8 @@ baseline = 纯向量 `k=1`；optimized = `hybrid` `k=4`（候选 10）。
 $env:PYTHONUTF8='1'
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 
-# 跑测试（98 条，约 4 秒；不联网、不需要 API Key、不需要本地嵌入服务）
+# 跑测试（119 条，约 7 秒；不联网、不需要 API Key、不需要本地嵌入服务）
+# 覆盖率（只做"看得见"，不设门槛；实测 TOTAL 45%，命令与读数见 CHANGES §5.8.7）
 .\.venv\Scripts\python.exe -m pytest
 
 # 生成 job summary 并预览（CI 里靠 GITHUB_STEP_SUMMARY 追加到页面上）
@@ -441,12 +477,23 @@ $env:PYTHONUTF8='1'
 | `test_import_smoke.py` | ★ 全部模块能 import + **`RagService` 能构造** —— 这是 `CHANGES` §5.2 那个**致命 ImportError** 的固化回归（当时它只是文档里的一句命令，而 mock 评测链路发现不了它） |
 | `test_ci_summary.py` | CI summary 的统计正确，且**"不跑 IR / 不跑 RAGAS"的声明不可腐化** |
 
+| `test_chat_backend.py` | ★ 生成/裁判侧**不许写死厂商**：缺 Key 的变量名按后端解析、`n>1` 不支持时 `strictness` 降到 1、报告记**实际调用**的模型名（§5.9 的三类问题） |
+
 **CI 刻意不跑什么**（`.github/workflows/tests.yml`，每个 job 的 summary 都会打印这段声明）：
 
 - ❌ **不跑 IR 评测** —— IR 指标本身确定，但**向量腿不是**（HNSW 近似检索，跨进程候选集合会变），
   做成门禁会随机变红。它只在需要时人工跑，且必须带 `--repeat 3` 输出实测噪声地板。
 - ❌ **不跑 RAGAS** —— 4 个指标需要**外部 LLM 裁判**（Key 不进仓库），
   而且**裁判本身有运行间噪声**（实测同一配置两次独立运行极差 0.01~0.06）→ 当成门禁会随机变红。
+
+**端到端问答冒烟**（同样**不进 CI**，单测只证明"能构造"，它才证明"真问一句有答案"）：
+
+```powershell
+$env:CHAT_BACKEND='openai-compatible'; $env:EMBEDDING_BACKEND='local'
+.\.venv\Scripts\python.exe scripts\e2e_smoke.py --limit 3 --collection rag_local_corpus_c300_o30 --top-k 4
+```
+
+真检索 + 真生成，断言每条"答案非空且带依据"，退出码即结果。详见 `CHANGES.md §5.8.8`。
 
 ---
 
@@ -466,7 +513,7 @@ KnowledgeBase-RAG-LLM-System/
 ├─ config_data.py             全局配置
 ├─ .github/workflows/
 │  └─ tests.yml               CI：只跑确定性单测（不跑 IR、不跑 RAGAS）
-├─ tests/                     ★ 98 条确定性单测（见上节）
+├─ tests/                     ★ 119 条确定性单测（见上节）
 │  ├─ conftest.py             公共装置（路径注入 / 状态隔离 / 离线嵌入替身）
 │  ├─ test_hygiene.py         路径、废弃配置、文档交叉引用、密钥忽略
 │  ├─ test_chunking_and_extract.py
@@ -476,10 +523,12 @@ KnowledgeBase-RAG-LLM-System/
 │  ├─ test_import_smoke.py    ★ 全模块 import + RagService 可构造（§5.2 缺陷回归）
 │  ├─ test_ir_metrics.py
 │  ├─ test_dataset.py
+│  ├─ test_chat_backend.py    ★ 生成/裁判后端不写死厂商（§5.9）
 │  └─ test_ci_summary.py
 ├─ scripts/
 │  ├─ ingest.py               命令行入库（支持分块参数 / 集合隔离 / --dry-run）
 │  ├─ build_corpus.py         抓取评测语料（可重跑）
+│  ├─ e2e_smoke.py            端到端问答冒烟（真检索 + 真生成；不进 CI）
 │  └─ ci_summary.py           把 junit.xml 变成 job summary（含覆盖范围声明）
 ├─ evaluation/
 │  ├─ dataset.py              评测集构建（29 条内置样本 + JSONL 读写）
