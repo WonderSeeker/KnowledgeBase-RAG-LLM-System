@@ -954,6 +954,19 @@ $common = @('evaluation\run_ir.py','--configs','300/30','--retrievers','hybrid',
    - 噪声地板两次分别是 **2~3 题 → 0.3~1 题**。
    - → 对外引用请写「**约 2~9 倍**」「**从约 2~3 题降到约 1 题**」，不要写死单次值。
 
+**证据（已按本仓库约定纳入版本控制）**：`run_ir.py` 默认把产物写进被忽略的
+`evaluation/reports/`，于是本文的数字在仓库里**无法被第三方核实**（只能自己重跑）。
+现把两批的汇总产物复制到跟踪区（与 `report_baseline.json` 等 RAGAS 证据同一位置）：
+
+| 文件 | 内容 |
+|---|---|
+| `evaluation/report_rerankoff_ir.json` / `report_rerankon_ir.json` | **原批次**（4.12 表格的来源） |
+| `evaluation/report_rerankoff_v2_ir.json` / `report_rerankon_v2_ir.json` | **复跑批次**（本小节表格的来源） |
+| `evaluation/REPORT_ir_rerank{off,on}{,_v2}.md` | 对应的人读版对比报告 |
+
+每份 JSON 里：`metrics.*` = 指标值、`meta.noise_floor.by_metric` = 逐指标地板、
+`meta.repeat_runs` = 3 次独立运行的明细 —— 表格里每个数字都能对上。
+
 ### 4.5 这一步挖出来的问题
 
 1. **`max_spliter_char_number = 1000` 让"调小 chunk_size"对短文档完全无效** —— 已修复，见 4.8。

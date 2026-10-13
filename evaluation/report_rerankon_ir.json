@@ -1,0 +1,1024 @@
+{
+  "meta": {
+    "name": "rerankon_local_c300_o30_hybrid",
+    "mode": "ir",
+    "judge": "deterministic",
+    "generated_at": "2026-10-13 13:49:36",
+    "eval_set": "evaluation\\eval_set_v2.jsonl",
+    "eval_size": 36,
+    "retrieval": {
+      "method": "hybrid",
+      "top_k": 4,
+      "candidate_k": 10,
+      "rrf_k": 60,
+      "rerank": true,
+      "rerank_model": "gte-rerank-v2",
+      "chunk_size": 300,
+      "chunk_overlap": 30,
+      "corpus_chunks": 872,
+      "collection": "rag_local_corpus_c300_o30",
+      "embedding_backend": "local",
+      "embedding_model": "bge-small-zh-v1.5",
+      "embedding_dim": 512
+    },
+    "caliber": {
+      "doc": {
+        "label_level": "文档级",
+        "chunk_total": 872,
+        "text": "文档级标注：每个 query 的正例 = 评测集的 source 字段（应命中的 .txt）。规则确定、可复现；局限是文档数少时指标容易饱和。"
+      },
+      "chunk": {
+        "label_level": "片段级（弱标注）",
+        "base_rate": 0.1008,
+        "text": "片段级**弱标注**：正例 = 与标准答案嵌入相似度 ≥ 阈值的片段。★ 这是自动生成的弱标注，不是人工标注；且它由嵌入模型生成，与该口径下的向量检索**同源**，存在循环性（详见报告的口径说明）。",
+        "threshold": 0.6,
+        "chunk_total": 872,
+        "avg_positive_per_query": 87.89,
+        "note": "片段级弱标注：正例 = 与标准答案嵌入相似度 ≥ 阈值的片段，自动生成、非人工标注；阈值是口径的一部分。"
+      },
+      "kw": {
+        "label_level": "片段级（对抗性口径）",
+        "base_rate": 0.1017,
+        "text": "片段级**对抗性口径**：正例 = 片段文本里出现了该问题的 answer_keywords（纯词面匹配）。★ 这个口径**系统性偏袒 BM25 这类关键词检索**、对向量检索不利 —— 这是故意的：若向量检索在此口径下仍然胜出，结论就比弱标注口径硬；若反转，则说明弱标注口径下的优势确实来自'标注生成器与向量检索同源'的循环性。两种结果都有信息量。",
+        "chunk_total": 872,
+        "avg_positive_per_query": 88.67,
+        "items_without_positive": [],
+        "note": "片段级对抗性口径：正例 = 片段包含该问题的 answer_keywords（纯词面），刻意偏袒关键词检索；若向量检索在此口径下仍胜出，结论更硬。"
+      }
+    },
+    "avg_n_contexts": 4.0,
+    "avg_query_seconds": 0.1909,
+    "run_seconds": 9.79,
+    "repeat_n": 3,
+    "warning": "IR 指标（确定性，非 RAGAS）：测检索排序质量，不含生成质量。doc_* 文档级（无循环）/ kw_* 对抗口径（无嵌入）/ chunk_* 弱标注（嵌入同源）。本报告为 3 个独立进程的均值，实测噪声地板 0.0092（0.3 题 / 36）。",
+    "repeat_runs": [
+      "rerankon_r1_local_c300_o30_hybrid",
+      "rerankon_r2_local_c300_o30_hybrid",
+      "rerankon_r3_local_c300_o30_hybrid"
+    ],
+    "noise_floor": {
+      "value": 0.0092,
+      "items": 0.3,
+      "eval_size": 36,
+      "headline_metrics": [
+        "doc_hit_rate@1",
+        "doc_mrr",
+        "kw_precision@3",
+        "chunk_precision@3"
+      ],
+      "max_by_metric": 0.111,
+      "by_metric": {
+        "doc_hit_rate@1": 0.0,
+        "doc_recall@1": 0.0,
+        "doc_precision@1": 0.0,
+        "doc_hit_rate@3": 0.0,
+        "doc_recall@3": 0.0,
+        "doc_precision@3": 0.0,
+        "doc_hit_rate@5": 0.0,
+        "doc_recall@5": 0.0,
+        "doc_precision@5": 0.0,
+        "doc_mrr": 0.0,
+        "doc_ndcg@5": 0.0,
+        "chunk_hit_rate@1": 0.0,
+        "chunk_recall@1": 0.0,
+        "chunk_precision@1": 0.0,
+        "chunk_hit_rate@3": 0.0278,
+        "chunk_recall@3": 0.0007,
+        "chunk_precision@3": 0.0092,
+        "chunk_hit_rate@5": 0.0278,
+        "chunk_recall@5": 0.0007,
+        "chunk_precision@5": 0.0112,
+        "chunk_mrr": 0.0093,
+        "chunk_ndcg@5": 0.0087,
+        "chunk_lift@1": 0.0,
+        "chunk_lift@3": 0.091,
+        "chunk_lift@5": 0.111,
+        "kw_hit_rate@1": 0.0,
+        "kw_recall@1": 0.0,
+        "kw_precision@1": 0.0,
+        "kw_hit_rate@3": 0.0278,
+        "kw_recall@3": 0.0003,
+        "kw_precision@3": 0.0092,
+        "kw_hit_rate@5": 0.0278,
+        "kw_recall@5": 0.0006,
+        "kw_precision@5": 0.0111,
+        "kw_mrr": 0.0092,
+        "kw_ndcg@5": 0.0088,
+        "kw_lift@1": 0.0,
+        "kw_lift@3": 0.091,
+        "kw_lift@5": 0.109
+      },
+      "note": "同一配置 N 个独立进程实测极差。向量腿为 HNSW 近似检索，候选集合跨进程会变（实测 36 题里 24 题的集合不同），故存在此下界。对比表按 by_metric 逐行判断：|差值| 不超过该指标地板的一律标注为无法排序。headline 只取主指标 ['doc_hit_rate@1', 'doc_mrr', 'kw_precision@3', 'chunk_precision@3'] 里的最大值。"
+    },
+    "per_question_note": "per_question 取自第 1 次运行（共 3 次，各次排名可能略有差异）"
+  },
+  "metrics": {
+    "doc_hit_rate@1": 0.75,
+    "doc_recall@1": 0.75,
+    "doc_precision@1": 0.75,
+    "doc_hit_rate@3": 0.9167,
+    "doc_recall@3": 0.9167,
+    "doc_precision@3": 0.3056,
+    "doc_hit_rate@5": 0.9167,
+    "doc_recall@5": 0.9167,
+    "doc_precision@5": 0.1833,
+    "doc_mrr": 0.8333,
+    "doc_ndcg@5": 0.8552,
+    "chunk_hit_rate@1": 0.8056,
+    "chunk_recall@1": 0.0421,
+    "chunk_precision@1": 0.8056,
+    "chunk_hit_rate@3": 0.8982,
+    "chunk_recall@3": 0.0667,
+    "chunk_precision@3": 0.6698,
+    "chunk_hit_rate@5": 0.9074,
+    "chunk_recall@5": 0.0756,
+    "chunk_precision@5": 0.5,
+    "chunk_mrr": 0.848,
+    "chunk_ndcg@5": 0.5898,
+    "chunk_lift@1": 7.993,
+    "chunk_lift@3": 6.6453,
+    "chunk_lift@5": 4.9607,
+    "kw_hit_rate@1": 0.75,
+    "kw_recall@1": 0.0263,
+    "kw_precision@1": 0.75,
+    "kw_hit_rate@3": 0.8426,
+    "kw_recall@3": 0.0613,
+    "kw_precision@3": 0.6235,
+    "kw_hit_rate@5": 0.8518,
+    "kw_recall@5": 0.0747,
+    "kw_precision@5": 0.487,
+    "kw_mrr": 0.7971,
+    "kw_ndcg@5": 0.5552,
+    "kw_lift@1": 7.376,
+    "kw_lift@3": 6.1313,
+    "kw_lift@5": 4.7893
+  },
+  "per_question": [
+    {
+      "id": "intro-01",
+      "question": "Python 里 / 和 // 两个除号得到的结果有什么不一样？",
+      "relevant_docs": [
+        "01_python_intro.txt"
+      ],
+      "ranked_docs": [
+        "01_python_intro.txt",
+        "11_pathlib.txt"
+      ],
+      "ranked_chunks": [
+        "01_python_intro.txt#3",
+        "11_pathlib.txt#21",
+        "01_python_intro.txt#32",
+        "01_python_intro.txt#16"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.752,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 2,
+      "kw_relevant_n": 9
+    },
+    {
+      "id": "intro-02",
+      "question": "字符串字面量前面加一个 r 有什么作用？",
+      "relevant_docs": [
+        "01_python_intro.txt"
+      ],
+      "ranked_docs": [
+        "12_regex.txt",
+        "01_python_intro.txt",
+        "05_inputoutput.txt"
+      ],
+      "ranked_chunks": [
+        "12_regex.txt#40",
+        "01_python_intro.txt#9",
+        "05_inputoutput.txt#1",
+        "05_inputoutput.txt#7"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 0.0,
+      "doc_rr": 0.5,
+      "seconds": 0.154,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 45,
+      "kw_relevant_n": 30
+    },
+    {
+      "id": "intro-03",
+      "question": "我想让一段文字占到好几行，不用一行行拼，能怎么表示？",
+      "relevant_docs": [
+        "01_python_intro.txt"
+      ],
+      "ranked_docs": [
+        "02_controlflow.txt",
+        "01_python_intro.txt",
+        "05_inputoutput.txt"
+      ],
+      "ranked_chunks": [
+        "02_controlflow.txt#71",
+        "01_python_intro.txt#9",
+        "05_inputoutput.txt#29",
+        "05_inputoutput.txt#28"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 0.0,
+      "doc_rr": 0.5,
+      "seconds": 0.154,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 110,
+      "kw_relevant_n": 16
+    },
+    {
+      "id": "flow-01",
+      "question": "range() 和 enumerate() 在 for 循环里分别解决什么问题？",
+      "relevant_docs": [
+        "02_controlflow.txt"
+      ],
+      "ranked_docs": [
+        "02_controlflow.txt",
+        "03_datastructures.txt"
+      ],
+      "ranked_chunks": [
+        "02_controlflow.txt#6",
+        "02_controlflow.txt#7",
+        "03_datastructures.txt#36",
+        "02_controlflow.txt#11"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.203,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 25,
+      "kw_relevant_n": 32
+    },
+    {
+      "id": "flow-02",
+      "question": "给函数参数设默认值时，如果默认值本身是可变的（比如列表），会有什么问题？怎么避免？",
+      "relevant_docs": [
+        "02_controlflow.txt"
+      ],
+      "ranked_docs": [
+        "02_controlflow.txt",
+        "09_json.txt"
+      ],
+      "ranked_chunks": [
+        "02_controlflow.txt#39",
+        "02_controlflow.txt#37",
+        "02_controlflow.txt#40",
+        "09_json.txt#24"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.122,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 78,
+      "kw_relevant_n": 104
+    },
+    {
+      "id": "flow-03",
+      "question": "定义函数的时候，怎么规定某个入参只能按顺序给、另一个只能用名字给？",
+      "relevant_docs": [
+        "02_controlflow.txt"
+      ],
+      "ranked_docs": [
+        "02_controlflow.txt",
+        "07_classes.txt"
+      ],
+      "ranked_chunks": [
+        "02_controlflow.txt#58",
+        "02_controlflow.txt#52",
+        "07_classes.txt#34",
+        "02_controlflow.txt#49"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.185,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 9,
+      "kw_relevant_n": 263
+    },
+    {
+      "id": "ds-01",
+      "question": "列表推导式的写法是怎样的？能举个例子吗？",
+      "relevant_docs": [
+        "03_datastructures.txt"
+      ],
+      "ranked_docs": [
+        "03_datastructures.txt"
+      ],
+      "ranked_chunks": [
+        "03_datastructures.txt#11",
+        "03_datastructures.txt#10",
+        "03_datastructures.txt#17",
+        "03_datastructures.txt#16"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.161,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 122,
+      "kw_relevant_n": 102
+    },
+    {
+      "id": "ds-02",
+      "question": "列表和元组有什么区别？",
+      "relevant_docs": [
+        "03_datastructures.txt"
+      ],
+      "ranked_docs": [
+        "03_datastructures.txt",
+        "02_controlflow.txt"
+      ],
+      "ranked_chunks": [
+        "03_datastructures.txt#24",
+        "02_controlflow.txt#25",
+        "03_datastructures.txt#21",
+        "03_datastructures.txt#30"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.133,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 29,
+      "kw_relevant_n": 109
+    },
+    {
+      "id": "ds-03",
+      "question": "手上有两个键值对表，想把它们并成一份，有什么简洁的做法？",
+      "relevant_docs": [
+        "03_datastructures.txt"
+      ],
+      "ranked_docs": [
+        "03_datastructures.txt",
+        "12_regex.txt",
+        "02_controlflow.txt"
+      ],
+      "ranked_chunks": [
+        "03_datastructures.txt#31",
+        "03_datastructures.txt#35",
+        "12_regex.txt#129",
+        "02_controlflow.txt#19"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.218,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 57,
+      "kw_relevant_n": 54
+    },
+    {
+      "id": "mod-01",
+      "question": "if __name__ == '__main__': 这行判断有什么用？",
+      "relevant_docs": [
+        "04_modules.txt"
+      ],
+      "ranked_docs": [
+        "04_modules.txt",
+        "05_inputoutput.txt"
+      ],
+      "ranked_chunks": [
+        "04_modules.txt#10",
+        "04_modules.txt#9",
+        "05_inputoutput.txt#16",
+        "04_modules.txt#19"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.132,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 24,
+      "kw_relevant_n": 14
+    },
+    {
+      "id": "mod-02",
+      "question": "包目录里的 __init__.py 起什么作用？",
+      "relevant_docs": [
+        "04_modules.txt"
+      ],
+      "ranked_docs": [
+        "04_modules.txt"
+      ],
+      "ranked_chunks": [
+        "04_modules.txt#35",
+        "04_modules.txt#34",
+        "04_modules.txt#39",
+        "04_modules.txt#33"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.241,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 161,
+      "kw_relevant_n": 170
+    },
+    {
+      "id": "mod-03",
+      "question": "不想把整个文件的东西都引进来，只想要里面某一个函数，可以怎么写？",
+      "relevant_docs": [
+        "04_modules.txt"
+      ],
+      "ranked_docs": [
+        "02_controlflow.txt",
+        "04_modules.txt"
+      ],
+      "ranked_chunks": [
+        "02_controlflow.txt#38",
+        "04_modules.txt#0",
+        "04_modules.txt#38",
+        "04_modules.txt#41"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 0.0,
+      "doc_rr": 0.5,
+      "seconds": 0.184,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 37,
+      "kw_relevant_n": 83
+    },
+    {
+      "id": "io-01",
+      "question": "open() 的常用模式参数有哪些？分别是什么含义？",
+      "relevant_docs": [
+        "05_inputoutput.txt"
+      ],
+      "ranked_docs": [
+        "05_inputoutput.txt",
+        "12_regex.txt",
+        "11_pathlib.txt"
+      ],
+      "ranked_chunks": [
+        "05_inputoutput.txt#22",
+        "05_inputoutput.txt#21",
+        "12_regex.txt#72",
+        "11_pathlib.txt#85"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.131,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 15,
+      "kw_relevant_n": 844
+    },
+    {
+      "id": "io-02",
+      "question": "用 with 语句打开文件有什么好处？",
+      "relevant_docs": [
+        "05_inputoutput.txt"
+      ],
+      "ranked_docs": [
+        "05_inputoutput.txt",
+        "06_errors.txt",
+        "11_pathlib.txt"
+      ],
+      "ranked_chunks": [
+        "05_inputoutput.txt#25",
+        "06_errors.txt#32",
+        "11_pathlib.txt#82",
+        "11_pathlib.txt#4"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.168,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 24,
+      "kw_relevant_n": 100
+    },
+    {
+      "id": "io-03",
+      "question": "我想把一系列数字存进磁盘上的文件、而不是打到屏幕上，该怎么做？",
+      "relevant_docs": [
+        "05_inputoutput.txt"
+      ],
+      "ranked_docs": [
+        "05_inputoutput.txt",
+        "10_sqlite3.txt",
+        "06_errors.txt"
+      ],
+      "ranked_chunks": [
+        "05_inputoutput.txt#25",
+        "10_sqlite3.txt#84",
+        "10_sqlite3.txt#15",
+        "06_errors.txt#47"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.262,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 276,
+      "kw_relevant_n": 48
+    },
+    {
+      "id": "err-01",
+      "question": "try 语句里的 except、else、finally 分别在什么时候执行？",
+      "relevant_docs": [
+        "06_errors.txt"
+      ],
+      "ranked_docs": [
+        "06_errors.txt"
+      ],
+      "ranked_chunks": [
+        "06_errors.txt#26",
+        "06_errors.txt#27",
+        "06_errors.txt#6",
+        "06_errors.txt#13"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.131,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 97,
+      "kw_relevant_n": 56
+    },
+    {
+      "id": "err-02",
+      "question": "raise ... from ... 这种写法的作用是什么？",
+      "relevant_docs": [
+        "06_errors.txt"
+      ],
+      "ranked_docs": [
+        "06_errors.txt"
+      ],
+      "ranked_chunks": [
+        "06_errors.txt#20",
+        "06_errors.txt#23",
+        "06_errors.txt#15",
+        "06_errors.txt#25"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.134,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 1,
+      "kw_relevant_n": 70
+    },
+    {
+      "id": "err-03",
+      "question": "程序拿到不认识的输入时，我想主动中断并给出提示，该怎么写？",
+      "relevant_docs": [
+        "06_errors.txt"
+      ],
+      "ranked_docs": [
+        "06_errors.txt",
+        "02_controlflow.txt"
+      ],
+      "ranked_chunks": [
+        "06_errors.txt#5",
+        "06_errors.txt#11",
+        "02_controlflow.txt#14",
+        "02_controlflow.txt#38"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.236,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 132,
+      "kw_relevant_n": 95
+    },
+    {
+      "id": "cls-01",
+      "question": "类变量和实例变量有什么区别？",
+      "relevant_docs": [
+        "07_classes.txt"
+      ],
+      "ranked_docs": [
+        "07_classes.txt"
+      ],
+      "ranked_chunks": [
+        "07_classes.txt#26",
+        "07_classes.txt#0",
+        "07_classes.txt#1",
+        "07_classes.txt#28"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.232,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 48,
+      "kw_relevant_n": 46
+    },
+    {
+      "id": "cls-02",
+      "question": "子类里调用 super() 是做什么的？",
+      "relevant_docs": [
+        "07_classes.txt"
+      ],
+      "ranked_docs": [
+        "11_pathlib.txt",
+        "07_classes.txt"
+      ],
+      "ranked_chunks": [
+        "11_pathlib.txt#51",
+        "07_classes.txt#42",
+        "07_classes.txt#39",
+        "11_pathlib.txt#53"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 0.0,
+      "doc_rr": 0.5,
+      "seconds": 0.255,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 12,
+      "kw_relevant_n": 7
+    },
+    {
+      "id": "cls-03",
+      "question": "不想让外面的代码随便改对象内部的数据，有什么约定或做法？",
+      "relevant_docs": [
+        "07_classes.txt"
+      ],
+      "ranked_docs": [
+        "07_classes.txt",
+        "05_inputoutput.txt"
+      ],
+      "ranked_chunks": [
+        "07_classes.txt#44",
+        "07_classes.txt#33",
+        "07_classes.txt#32",
+        "05_inputoutput.txt#34"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.128,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 3,
+      "kw_relevant_n": 360
+    },
+    {
+      "id": "std-01",
+      "question": "标准库概览里，日期和时间分别用哪个模块处理？",
+      "relevant_docs": [
+        "08_stdlib_overview.txt"
+      ],
+      "ranked_docs": [
+        "08_stdlib_overview.txt",
+        "04_modules.txt"
+      ],
+      "ranked_chunks": [
+        "08_stdlib_overview.txt#12",
+        "04_modules.txt#16",
+        "08_stdlib_overview.txt#0",
+        "04_modules.txt#12"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.156,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 15,
+      "kw_relevant_n": 29
+    },
+    {
+      "id": "std-02",
+      "question": "想从一串候选里随机抽几个，用标准库的哪个模块？",
+      "relevant_docs": [
+        "08_stdlib_overview.txt"
+      ],
+      "ranked_docs": [
+        "04_modules.txt",
+        "08_stdlib_overview.txt",
+        "09_json.txt"
+      ],
+      "ranked_chunks": [
+        "04_modules.txt#16",
+        "08_stdlib_overview.txt#8",
+        "04_modules.txt#12",
+        "09_json.txt#1"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 0.0,
+      "doc_rr": 0.5,
+      "seconds": 0.129,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 14,
+      "kw_relevant_n": 5
+    },
+    {
+      "id": "std-03",
+      "question": "想按通配符把一堆文件筛出来，标准库里有什么现成工具？",
+      "relevant_docs": [
+        "08_stdlib_overview.txt"
+      ],
+      "ranked_docs": [
+        "08_stdlib_overview.txt",
+        "04_modules.txt",
+        "09_json.txt"
+      ],
+      "ranked_chunks": [
+        "08_stdlib_overview.txt#2",
+        "04_modules.txt#12",
+        "04_modules.txt#16",
+        "09_json.txt#59"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.131,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 103,
+      "kw_relevant_n": 22
+    },
+    {
+      "id": "json-01",
+      "question": "json.dumps() 和 json.dump() 有什么区别？",
+      "relevant_docs": [
+        "09_json.txt"
+      ],
+      "ranked_docs": [
+        "05_inputoutput.txt",
+        "09_json.txt"
+      ],
+      "ranked_chunks": [
+        "05_inputoutput.txt#35",
+        "09_json.txt#22",
+        "09_json.txt#2",
+        "09_json.txt#3"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 0.0,
+      "doc_rr": 0.5,
+      "seconds": 0.227,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 95,
+      "kw_relevant_n": 15
+    },
+    {
+      "id": "json-02",
+      "question": "序列化出来的中文变成了 \\uXXXX，怎么让它保持原样？",
+      "relevant_docs": [
+        "09_json.txt"
+      ],
+      "ranked_docs": [
+        "12_regex.txt",
+        "05_inputoutput.txt",
+        "11_pathlib.txt"
+      ],
+      "ranked_chunks": [
+        "12_regex.txt#69",
+        "12_regex.txt#17",
+        "05_inputoutput.txt#24",
+        "11_pathlib.txt#133"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 0.0,
+      "doc_rr": 0.0,
+      "seconds": 0.138,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 104,
+      "kw_relevant_n": 7
+    },
+    {
+      "id": "json-03",
+      "question": "从网络收到一段文本，怎么把它变成 Python 里能直接用的字典或列表？",
+      "relevant_docs": [
+        "09_json.txt"
+      ],
+      "ranked_docs": [
+        "03_datastructures.txt",
+        "05_inputoutput.txt",
+        "02_controlflow.txt",
+        "01_python_intro.txt"
+      ],
+      "ranked_chunks": [
+        "03_datastructures.txt#30",
+        "05_inputoutput.txt#34",
+        "02_controlflow.txt#30",
+        "01_python_intro.txt#27"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 0.0,
+      "doc_rr": 0.0,
+      "seconds": 0.227,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 303,
+      "kw_relevant_n": 11
+    },
+    {
+      "id": "sql-01",
+      "question": "用 sqlite3 查询数据库的基本步骤是什么？",
+      "relevant_docs": [
+        "10_sqlite3.txt"
+      ],
+      "ranked_docs": [
+        "10_sqlite3.txt"
+      ],
+      "ranked_chunks": [
+        "10_sqlite3.txt#0",
+        "10_sqlite3.txt#3",
+        "10_sqlite3.txt#151",
+        "10_sqlite3.txt#1"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.166,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 281,
+      "kw_relevant_n": 46
+    },
+    {
+      "id": "sql-02",
+      "question": "为什么推荐用问号占位符传参，而不是把值拼进 SQL 字符串？",
+      "relevant_docs": [
+        "10_sqlite3.txt"
+      ],
+      "ranked_docs": [
+        "10_sqlite3.txt",
+        "02_controlflow.txt"
+      ],
+      "ranked_chunks": [
+        "10_sqlite3.txt#123",
+        "10_sqlite3.txt#13",
+        "10_sqlite3.txt#126",
+        "02_controlflow.txt#15"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.207,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 140,
+      "kw_relevant_n": 15
+    },
+    {
+      "id": "sql-03",
+      "question": "要一次把一批数据写进表里，而不是一条一条来，用哪个方法？",
+      "relevant_docs": [
+        "10_sqlite3.txt"
+      ],
+      "ranked_docs": [
+        "10_sqlite3.txt",
+        "07_classes.txt",
+        "05_inputoutput.txt"
+      ],
+      "ranked_chunks": [
+        "10_sqlite3.txt#14",
+        "07_classes.txt#21",
+        "05_inputoutput.txt#29",
+        "10_sqlite3.txt#93"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.245,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 160,
+      "kw_relevant_n": 14
+    },
+    {
+      "id": "path-01",
+      "question": "Path 对象怎么表示子路径或拼接路径？",
+      "relevant_docs": [
+        "11_pathlib.txt"
+      ],
+      "ranked_docs": [
+        "11_pathlib.txt"
+      ],
+      "ranked_chunks": [
+        "11_pathlib.txt#53",
+        "11_pathlib.txt#0",
+        "11_pathlib.txt#63",
+        "11_pathlib.txt#62"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.135,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 44,
+      "kw_relevant_n": 210
+    },
+    {
+      "id": "path-02",
+      "question": "Path.glob() 和 Path.rglob() 有什么区别？",
+      "relevant_docs": [
+        "11_pathlib.txt"
+      ],
+      "ranked_docs": [
+        "11_pathlib.txt"
+      ],
+      "ranked_chunks": [
+        "11_pathlib.txt#124",
+        "11_pathlib.txt#122",
+        "11_pathlib.txt#92",
+        "11_pathlib.txt#119"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.169,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 11,
+      "kw_relevant_n": 30
+    },
+    {
+      "id": "path-03",
+      "question": "想知道某个路径上到底存不存在东西，跨平台该怎么判断？",
+      "relevant_docs": [
+        "11_pathlib.txt"
+      ],
+      "ranked_docs": [
+        "11_pathlib.txt"
+      ],
+      "ranked_chunks": [
+        "11_pathlib.txt#71",
+        "11_pathlib.txt#135",
+        "11_pathlib.txt#137",
+        "11_pathlib.txt#136"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.178,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 144,
+      "kw_relevant_n": 9
+    },
+    {
+      "id": "re-01",
+      "question": "re.match() 和 re.search() 有什么区别？",
+      "relevant_docs": [
+        "12_regex.txt"
+      ],
+      "ranked_docs": [
+        "12_regex.txt"
+      ],
+      "ranked_chunks": [
+        "12_regex.txt#112",
+        "12_regex.txt#59",
+        "12_regex.txt#113",
+        "12_regex.txt#85"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.156,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 273,
+      "kw_relevant_n": 60
+    },
+    {
+      "id": "re-02",
+      "question": "re.findall() 返回的是什么？",
+      "relevant_docs": [
+        "12_regex.txt"
+      ],
+      "ranked_docs": [
+        "12_regex.txt"
+      ],
+      "ranked_chunks": [
+        "12_regex.txt#65",
+        "12_regex.txt#66",
+        "12_regex.txt#122",
+        "12_regex.txt#87"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 1.0,
+      "doc_rr": 1.0,
+      "seconds": 0.145,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 51,
+      "kw_relevant_n": 91
+    },
+    {
+      "id": "re-03",
+      "question": "从一段文字里把所有形如 年-月-日 的内容都捞出来，该怎么写？",
+      "relevant_docs": [
+        "12_regex.txt"
+      ],
+      "ranked_docs": [
+        "10_sqlite3.txt",
+        "08_stdlib_overview.txt",
+        "09_json.txt"
+      ],
+      "ranked_chunks": [
+        "10_sqlite3.txt#15",
+        "08_stdlib_overview.txt#13",
+        "09_json.txt#57",
+        "08_stdlib_overview.txt#12"
+      ],
+      "n_contexts": 4,
+      "doc_hit@1": 0.0,
+      "doc_rr": 0.0,
+      "seconds": 0.148,
+      "label_level": "chunk(weak)",
+      "chunk_relevant_n": 119,
+      "kw_relevant_n": 16
+    }
+  ]
+}
