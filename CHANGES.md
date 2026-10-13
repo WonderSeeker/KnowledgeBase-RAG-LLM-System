@@ -272,8 +272,20 @@ $env:CHAT_BACKEND='openai-compatible'
 |---|---|---|---|
 | `context_recall` | +0.412 | +0.377 | ✅ 一致（差 0.035） |
 | `faithfulness` | +0.254 | +0.236 | ✅ 一致（差 0.018） |
-| `context_precision` | +0.183 | +0.352 | ⚠️ 差 0.169 |
+| `context_precision` | +0.183 | +0.146 | ✅ 一致（差 0.037） |
 | `answer_relevancy` | −0.010 | +0.079 | ❌ 方向相反 |
+
+> **报数纠错留痕（2026-10-13 复核产物时发现）**：本表初版把 `context_precision` 的 qwen 侧写成
+> `+0.352`、判定「⚠️ 差 0.169」。按产物复算 —— `report_optimized_judgeqwen.json` 0.6181 −
+> `report_baseline_judgeqwen.json` 0.4722 = **+0.1459** —— 应为 `+0.146`、差 `0.037`，
+> 与另两行同属「一致」。（绝对值表 0.3611 → 0.4722 = +0.111 核对无误。）
+> 修正后结论更强：**四行里只有 `answer_relevancy` 方向相反**，其余三行 Δ 之差均 ≤0.04。
+
+> ⚠️ **另发现一处元数据缺陷（待办）**：这两份 `--reuse` 复评产物的 `meta.retrieval`
+> **没有继承原 run 的检索参数** —— `report_optimized_judgeqwen.json` 记成 `top_k=1`（实际 k=4），
+> 两份的 `embedding_model` 均为 `None`（实际 `bge-small-zh-v1.5`）。指标值取自已复用的答案集，
+> 仍然有效；但**只读 JSON 元数据的人会被误导**（以为这是一次 k=1 的运行）。
+> 修法：`--reuse` 分支把复用 run 的 `retrieval` 元数据一并向产物透传。
 
 **能说的**：
 1. **同源偏差不均匀**：`context_recall` / `faithfulness` 的结论换裁判后几乎不动（差 ≤0.04）
@@ -901,6 +913,46 @@ $env:CHAT_BACKEND='openai-compatible'
 
 **不能说**：① `chunk_recall@5` 的变化（−0.001，噪声内）；②"重排一定划算"——本次没测**成本**
 （每问一次多一次云端调用与延迟）。
+
+#### 4.12.1 复现命令 + 独立复跑（2026-10-13 第二批，同机）
+
+**复现命令**（两条只差 `--no-rerank` / `--rerank`）：
+
+```powershell
+cd D:\Projects ; .\svc.ps1 start llm          # ★ 本地嵌入服务（11434），懒加载
+cd D:\Projects\KnowledgeBase-RAG-LLM-System
+$common = @('evaluation\run_ir.py','--configs','300/30','--retrievers','hybrid',
+            '--top-k','4','--candidate-k','10','--embedding-backend','local',
+            '--corpus','corpus','--eval-set','evaluation\eval_set_v2.jsonl',
+            '--no-ingest','--repeat','3')
+.\.venv\Scripts\python.exe @common --name rerankoff --no-rerank
+.\.venv\Scripts\python.exe @common --name rerankon  --rerank
+```
+
+> ★ 有两个**必须显式传**的参数 —— 默认值会落到**别的被测对象**上，而出报告时不会报错：
+> - `--embedding-backend local`：默认 `dashscope` → 集合名会变成 `_dashscope_`，与本文数字**不可比**
+> - `--corpus corpus`：默认 `assets` → 只有 15 个片段，不是本文的 872
+
+**独立复跑结果**（产物 `*_v2_*`，与上表不同批次）：
+
+| 指标 | Δ 原批次 | Δ 复跑 | 复跑后地板 | 判定 |
+|---|---|---|---|---|
+| `kw_precision@1` | +0.1759 | **+0.1760** | 0.1111 | ✅ 几乎完全复现 |
+| `kw_precision@3` | +0.0803 | +0.0865 | 0.0092 | ✅ 同向同量级 |
+| `doc_hit_rate@1` | +0.1296 | +0.1574 | 0.0833 | ✅ 同向 |
+| `chunk_precision@3` | +0.0525 | +0.0586 | 0.0000 | ✅ 同向 |
+| `chunk_recall@5` | −0.0010 | +0.0035 | 0.0091 | ⚠️ 两次**都落在噪声内** → 结论一致（不可排序） |
+
+**噪声地板**：重排关 **3.0 题/36**（原批次 2.1）、重排开 **1.0 题/36**（原批次 0.3）。
+
+**复跑得到的两条结论**（都收窄了上面的写法）：
+
+1. **定性结论稳健**：三种口径一致提升在复跑中**再次出现**，且刻意不含嵌入的 `kw_*` 增益最大 ✓
+2. ★ **但数字必须读成区间，不能读成常数**：
+   - 幅度倍数两次分别是 **1.6~9.4×**（复跑）与 **1.9~6.4×**（原批次）—— 因为分母（地板）本身在变：
+     `kw_precision@1` 的地板 0.0277 → 0.1111，**同一个 Δ 就从 6.4× 变成 1.6×**。
+   - 噪声地板两次分别是 **2~3 题 → 0.3~1 题**。
+   - → 对外引用请写「**约 2~9 倍**」「**从约 2~3 题降到约 1 题**」，不要写死单次值。
 
 ### 4.5 这一步挖出来的问题
 

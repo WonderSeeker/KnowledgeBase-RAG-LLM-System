@@ -490,6 +490,14 @@ def main(argv: list[str] | None = None) -> int:
         # 复用明细时并不知道当时的嵌入环境，如实标注为"未知"而不是冒充已知
         run_env = {"collection": "（复用明细：未知）", "embedding_backend": "（复用明细：未知）",
                    "embedding_model": None, "embedding_dim": None}
+        # ★ 同理：检索参数也不该沿写【本次 CLI 的默认值】—— 那个值当初根本没参与检索。
+        #   未显式传 --top-k / --candidate-k 时记为 None（报告里落成 null），
+        #   避免出现「meta 写 top_k=1、而答案实际来自 k=4 的明细」这种元数据撒谎。
+        #   （2026-10-13 实测踩到：report_optimized_judgeqwen.json 记成 top_k=1。）
+        if args.top_k is None:
+            top_k = None
+        if args.candidate_k is None:
+            candidate_k = None
         print(f"[评测] 复用已有结果：{reuse_path}（{len(records)} 条），跳过 RAG 链路")
     else:
         items = load_eval_set(Path(args.eval_set))
