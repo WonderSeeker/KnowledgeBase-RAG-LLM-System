@@ -432,6 +432,18 @@ baseline = 纯向量 `k=1`；optimized = `hybrid` `k=4`（候选 10）。
 3. **噪声地板（最容易忽略的一个）**：向量腿跨进程不确定，`doc_hit@1` ±≈3 题 / 36。
    **凡是要下结论，先看差距有没有超过它**；报告层已把它做成自动标注，但仍然要知道它的存在。
 
+#### 另一份语料：医疗文档（2026-10-16 补，与上面的结论**不可混用**）
+
+`corpus_medical/`（12 篇中文维基医学条目 / **108,429 字** / CC BY-SA，见其 `SOURCES.md`）上另跑了一套完整评测：
+
+- 评测集 `eval_set_medical.jsonl`，**36 题**（关键词全部通过"逐字出现在来源文档"校验）；
+- `doc_hit_rate@1` / `doc_mrr` / `doc_ndcg@5` 均为 **1.0**（文档级饱和），噪声地板 **0.0 题 / 36**；
+- 重排在这份语料上**方向分裂**：`kw_precision@1` **+0.111**（无嵌入口径升）、
+  `chunk_precision@1` **−0.056**（嵌入同源口径降）→ **4.12 的重排结论不可迁移**。
+
+> 换语料 = 换评测前提。两套语料的结论**只能各自引用**，不能互相佐证。
+> 语料是**公开百科条目**，不是临床文档；真做医疗 RAG 需额外补脱敏、术语表与「可溯源」判分。详见 `CHANGES.md §4.13`。
+
 #### 其余局限
 
 - **IR 指标不要放进 CI 门禁**：向量腿跨进程不确定，做成门禁会随机变红。
@@ -528,13 +540,16 @@ KnowledgeBase-RAG-LLM-System/
 ├─ scripts/
 │  ├─ ingest.py               命令行入库（支持分块参数 / 集合隔离 / --dry-run）
 │  ├─ build_corpus.py         抓取评测语料（可重跑）
+│  ├─ build_corpus_medical.py 抓取医疗语料（中文维基医学条目，CC BY-SA）
 │  ├─ e2e_smoke.py            端到端问答冒烟（真检索 + 真生成；不进 CI）
 │  └─ ci_summary.py           把 junit.xml 变成 job summary（含覆盖范围声明）
 ├─ evaluation/
 │  ├─ dataset.py              评测集构建（29 条内置样本 + JSONL 读写）
 │  ├─ eval_set.jsonl          权威评测集（可直接手工增删）
 │  ├─ eval_set_v2.jsonl       扩语料后的评测集（36 题）
+│  ├─ eval_set_medical.jsonl  医疗评测集（36 题，关键词校验通过）
 │  ├─ build_eval_set.py       出题脚本（含答案关键词程序化校验）
+│  ├─ build_eval_set_medical.py 医疗出题脚本
 │  ├─ ir_metrics.py           确定性 IR 指标 + lift 归一化 + 口径文本
 │  ├─ run_ir.py               跑 IR 评测（支持 --repeat N 输出噪声地板）
 │  ├─ run_ragas.py            跑评测：链路产出 + RAGAS 打分 + 落 JSON
@@ -548,6 +563,7 @@ KnowledgeBase-RAG-LLM-System/
 ├─ requirements-dev.txt       测试依赖（pytest）
 ├─ pytest.ini
 ├─ corpus/                    评测语料（12 篇 Python 中文文档）
+├─ corpus_medical/            医疗评测语料（12 篇中文维基医学条目，CC BY-SA 4.0）
 ├─ assets/                    示例语料与 README 配图
 ├─ CHANGES.md                 改造记录：原项目 / 改了什么 / 量化结果 / 结论有效性划定
 └─ LICENSE
