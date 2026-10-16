@@ -55,6 +55,19 @@ SOURCES: list[tuple[str, str]] = [
     ("10_hypothyroidism", "甲状腺功能减退"),
     ("11_gastritis", "胃炎"),
     ("12_urticaria", "荨麻疹"),
+    # ---- 第二批（2026-10-16 扩充）：覆盖呼吸/感染/肾脏/代谢/神经/精神/心血管 ----
+    ("13_influenza", "流行性感冒"),
+    ("14_tuberculosis", "肺结核"),
+    ("15_hepatitis_b", "乙型肝炎"),
+    ("16_chronic_kidney_disease", "慢性肾脏病"),
+    ("17_gout", "痛风"),
+    ("18_rheumatoid_arthritis", "类风湿性关节炎"),
+    ("19_migraine", "偏头痛"),
+    ("20_epilepsy", "癫痫"),
+    ("21_alzheimer", "阿尔茨海默病"),
+    ("22_anxiety_disorder", "焦虑症"),
+    ("23_hyperlipidemia", "高脂血症"),
+    ("24_heart_failure", "心力衰竭"),
 ]
 
 
@@ -115,10 +128,19 @@ def clean(text: str) -> str:
     return "\n".join(deduped)
 
 
-def build(verbose: bool = True) -> int:
+def build(verbose: bool = True, skip_existing: bool = False) -> int:
     CORPUS_DIR.mkdir(parents=True, exist_ok=True)
     rows: list[tuple[str, int, str, str]] = []      # (文件名, 字数, 条目标题, URL)
     for name, title in SOURCES:
+        target = CORPUS_DIR / f"{name}.txt"
+        if skip_existing and target.exists():
+            # 已存在就跳过抓取，但仍要并入 SOURCES.md（否则清单会丢一半语料）
+            size = len(target.read_text(encoding="utf-8"))
+            rows.append((f"{name}.txt", size, title,
+                         f"https://zh.wikipedia.org/wiki/{urllib.parse.quote(title)}"))
+            if verbose:
+                print(f"[跳过] {name}.txt（已存在，{size} 字）")
+            continue
         text = None
         last_error: Exception | None = None
         for _attempt in (1, 2):                     # 维基偶发读超时，重试一次
@@ -195,6 +217,8 @@ def main() -> int:
     parser.add_argument("--list", action="store_true", help="只打印清单，不抓取")
     parser.add_argument("--reconvert", action="store_true",
                         help="不联网，只把已有 txt 做一次繁转简（修复混排）")
+    parser.add_argument("--add", action="store_true",
+                        help="只抓清单里**还没有**的条目，已存在的跳过（扩充语料时用）")
     args = parser.parse_args()
     if args.list:
         for name, title in SOURCES:
@@ -203,7 +227,7 @@ def main() -> int:
     if args.reconvert:
         return reconvert()
     started = time.perf_counter()
-    code = build()
+    code = build(skip_existing=args.add)
     print(f"[语料] 耗时 {time.perf_counter() - started:.1f}s")
     return code
 
