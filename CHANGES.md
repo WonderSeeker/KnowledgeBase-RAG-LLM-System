@@ -1586,7 +1586,28 @@ $env:EMBEDDING_BACKEND='local'             # 嵌入走本地 11434（先 .\svc.p
 | 实测 | 该 Key 可用：`qwen-max` / `qwen-plus` / `qwen-long`；`qwen3-max` 与 `qwen-max-latest` 均 **404** |
 | 修法 | `config_data.chat_model_name` 默认由 `qwen3-max` → **`qwen-max`**，并支持 `CHAT_MODEL_NAME` 环境变量覆盖 |
 
+**缺陷 3：DashScope 嵌入的批量被依赖写死成 25，而接口上限是 10**
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 用医疗语料入库时直接 400：`batch size is invalid, it should not be larger than 10` |
+| 根因 | `langchain_community/embeddings/dashscope.py` 的 `embed_with_retry` 把批次**硬编码成 25**（`input_data[i:i+25]`；本机路径 `.venv\Lib\site-packages\langchain_community\embeddings\dashscope.py:52`） |
+| 触发条件 | **片段数 > 10 才会踩到** —— `assets/` 3 篇只有 6 片段，所以一直没暴露 |
+| 修法 | `embeddings.py` 里子类化 `DashScopeEmbeddings` 并**按 10 分批**（项目红线：不动 requirements 的版本锁定，所以不改依赖） |
+
 **修复后实测**（默认配置，dashscope 全程，不依赖本地服务）：
+
+```
+# ① 服装示例语料（assets/，集合 rag 6 片段）
+POST /chat  {"question":"身高168cm、体重100斤，建议穿什么尺码？"}
+→ 建议尺码为M。依据 1 段；检索 0.24s / 生成 3.52s
+
+# ② 医疗语料（corpus_medical/，集合 rag 129 片段）
+POST /chat  {"question":"成人的血压高到多少算是高血压？"}
+→ 收缩压持续高于139 mmHg 或舒张压持续高于89 mmHg（24小时监测/家庭自测为 135/85）。
+   依据 1 段；总 7.62s
+   ★ 答案与文档原文一致（文档写 139/89），没有搬常识里的 140/90 —— 这是 RAG「有据可依」的直接证据
+```
 
 ```
 POST /chat  {"question":"身高168cm、体重100斤，建议穿什么尺码？"}

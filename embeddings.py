@@ -130,7 +130,29 @@ def build_embeddings(profile: EmbeddingProfile | None = None):
     profile = profile or resolve_profile()
     if profile.backend == "dashscope":
         from langchain_community.embeddings import DashScopeEmbeddings
-        return DashScopeEmbeddings(model=profile.model)
+
+        class _BatchedDashScopeEmbeddings(DashScopeEmbeddings):
+            """按 ≤10 条分批的 DashScope 嵌入。
+
+            ★ 为什么必须包一层（且不动 requirements 的版本锁定）：
+              `langchain_community` 的 `embed_with_retry` 把批次**硬编码成 25**
+              （`input_data[i:i+25]`），而 `text-embedding-v4` 的单次批量上限是 **10**。
+              语料小的时候碰不到（assets 3 篇 → 6 片段），
+              一入库 12 篇医疗语料（129 片段）就直接 400：
+              `batch size is invalid, it should not be larger than 10`。
+            """
+
+            _BATCH = 10
+
+            def embed_documents(self, texts: list[str]) -> list[list[float]]:
+                vectors: list[list[float]] = []
+                for start in range(0, len(texts), self._BATCH):
+                    vectors.extend(
+                        super().embed_documents(texts[start:start + self._BATCH])
+                    )
+                return vectors
+
+        return _BatchedDashScopeEmbeddings(model=profile.model)
 
     from langchain_openai import OpenAIEmbeddings
     return OpenAIEmbeddings(
