@@ -63,7 +63,11 @@ local_embedding_model = "bge-small-zh-v1.5"           # 实测 512 维、L2 归�
 local_embedding_api_key = "dummy-not-used"            # 本地服务不校验密钥，占位即可
 
 embedding_model_name="text-embedding-v4"
-chat_model_name="qwen3-max"
+# ★ 2026-10-16：默认值由 qwen3-max 改为 qwen-max。
+#   实测当前 Key 下 `qwen3-max` 返回 404 InvalidParameter: Model not exist，
+#   而 qwen-max / qwen-plus / qwen-long 可用 —— 默认值若不改，默认后端（dashscope）下
+#   每次问答都会 502。可用环境变量 CHAT_MODEL_NAME 覆盖。
+chat_model_name = os.environ.get("CHAT_MODEL_NAME", "qwen-max")
 
 # ---------------- 生成模型后端 ----------------
 # 为什么要它：RAGAS 的 faithfulness / answer_relevancy 需要**真实生成的答案**，

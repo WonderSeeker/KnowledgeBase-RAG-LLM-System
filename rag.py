@@ -87,11 +87,15 @@ class RagService(object):
         # 阶段 3：检索策略由 config.retrieval_method 决定（vector / bm25 / hybrid）
         self.retriever = self.__build_retriever()
 
+        # ★ 必须是**一条** system：上游原样是两条连续 system，而 DashScope 原生 SDK
+        #   （ChatTongyi，默认后端）会直接拒绝——"There can be only one system message at most."，
+        #   于是默认配置下每一次问答都 502；OpenAI 兼容端点（DeepSeek）容忍多条 system，
+        #   所以这个缺陷只在默认后端上暴露（切到 DeepSeek 就"看起来没事"）。
         self.prompt_template = ChatPromptTemplate.from_messages(
             [
                 ("system", "以我提供的已知参考资料为主，"
-                 "简洁和专业的回答用户问题。参考资料:{context}。"),
-                ("system", "并且我提供用户的对话历史记录，如下："),
+                 "简洁和专业的回答用户问题。参考资料:{context}。"
+                 "并且我提供用户的对话历史记录，如下："),
                 MessagesPlaceholder("history"),
                 ("user", "请回答用户提问：{input}")
             ]

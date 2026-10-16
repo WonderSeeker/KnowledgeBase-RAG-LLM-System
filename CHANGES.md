@@ -202,7 +202,9 @@ $env:CHAT_BACKEND='openai-compatible'
 
 **怎么才跑得起来**：把**生成与裁判**后端都切到 OpenAI 兼容端点（DeepSeek），嵌入继续用**本地 bge**
 —— 于是**完全不需要 DashScope**。为此新增了 `config.chat_backend` 与 `--judge-provider deepseek`
-（改动见 5.9）。DashScope 的 `text-embedding-v4` / `qwen3-max` 路径**保持默认不变**。
+（改动见 5.9）。DashScope 的 `text-embedding-v4` 路径**保持默认不变**；
+但生成模型的**默认值**已于 2026-10-16 由 `qwen3-max` 改为 `qwen-max`
+（实测该 Key 下 `qwen3-max` 返回 404，见 **5.10**）。
 
 评测条件（三份报告都写在 `meta` 里，可逐项核对）：
 
@@ -1561,6 +1563,45 @@ $env:EMBEDDING_BACKEND='local'             # 嵌入走本地 11434（先 .\svc.p
 ★ 这三条的共同教训：**"缺 Key / 参数默认值"这类地方最容易写死厂商**。
 而"先跑 1 条冒烟再跑全量"让它们在**花掉全量额度之前**就暴露了 —— 这条纪律值一次单独记录。
 
+### 5.10 启动即崩的两处默认配置缺陷（2026-10-16 补，实机按 README 默认配置启动时暴露）
+
+**背景**：按 README 的默认配置真起一遍（`.\svc.ps1 start kbapi,rag`），第一次 `POST /chat` 就 502。
+两个缺陷**都只在默认后端（`dashscope` / `ChatTongyi`）上暴露** —— 换成 DeepSeek（`openai-compatible`）
+就"看起来没事"，这正是它们能潜伏至今的原因（3.8 / 3.9 的真实评测全程走的是 DeepSeek）。
+
+**缺陷 1：提示词里有两条 system 消息 → DashScope 原生 SDK 直接拒绝**
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `/chat` 返回 **502**，`_logs\kbapi.out` 末端：`ValueError: There can be only one system message at most.` |
+| 位置 | `rag.py` 的 `ChatPromptTemplate.from_messages([...])`（**上游原样**）：两条连续 `("system", ...)` |
+| 根因 | `ChatTongyi` 只允许一条 system；`ChatOpenAI`（DeepSeek）容忍多条 |
+| 修法 | 两条合并为一条（语义不变） |
+
+**缺陷 2：默认生成模型 `qwen3-max` 在该 Key 下不存在**
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 修完缺陷 1 后**仍 502**：`404 InvalidParameter: Model not exist.` |
+| 实测 | 该 Key 可用：`qwen-max` / `qwen-plus` / `qwen-long`；`qwen3-max` 与 `qwen-max-latest` 均 **404** |
+| 修法 | `config_data.chat_model_name` 默认由 `qwen3-max` → **`qwen-max`**，并支持 `CHAT_MODEL_NAME` 环境变量覆盖 |
+
+**修复后实测**（默认配置，dashscope 全程，不依赖本地服务）：
+
+```
+POST /chat  {"question":"身高168cm、体重100斤，建议穿什么尺码？"}
+→ 答案：根据您提供的身高168cm和体重100斤的信息，建议尺码为M。
+→ 依据 1 段；检索 0.24s / 生成 3.52s / 总 3.75s
+```
+
+> ★ 两条的共同教训：**默认路径缺一条"真发一次请求"的回归**。
+> 119 条单测只到「能 import、能构造」（`test_import_smoke.py`）；
+> `scripts/e2e_smoke.py`（5.8.8）正是为补这一段而生的 ——
+> 但它默认走 DeepSeek，**建议补一次默认后端（dashscope）的冒烟**，否则同类缺陷仍会漏网。
+
+**顺带做掉的一次性工作**：把 `assets/` 的 3 份示例文本按默认配置入库（`scripts/ingest.py --rebuild`，
+集合 `rag` 6 片段 / 1024 维），使默认配置开箱即可问答（否则 `/health` 会是 `degraded`）。
+
 ### 6.1 有效产出（可以作为结论）
 
 | # | 产出 | 为什么有效 | 证据落在哪 |
@@ -1593,6 +1634,7 @@ $env:EMBEDDING_BACKEND='local'             # 嵌入走本地 11434（先 .\svc.p
 | 27 | **重排的真实收益**（DashScope Key 配好后补测）：`hybrid` 开/关各 3 个独立进程，**三个互不相同口径一致提升**（文档级 / 无嵌入对抗 / 嵌入同源），幅度为各自噪声地板的 **1.9~6.4 倍**；无嵌入口径提升最大；且重排把该配置噪声地板从 2.1 题压到 0.3 题 | 9 个独立进程实测；IR 侧新接入 `--rerank` | 4.12 |
 | 28 | **同源偏差已量化**：固定同一批答案、只换裁判（DeepSeek → qwen-plus），证明 `context_recall` / `faithfulness` 结论**跨裁判稳健**（差 ≤0.04），而 `answer_relevancy` 自评**系统性偏高约 0.175** 并掩盖了一个正变化 | `--reuse` 同源对比；两套裁判各 36 题 | 3.9 |
 | 29 | **换语料复测（医疗文档）**：新增 12 篇中文医学条目语料（公开、CC BY-SA、可复现）+ 36 题医疗评测集；实测文档级饱和（1.0）、噪声地板 0.0 题；且**重排收益在这份语料上「方向分裂」**（一个口径升、另一个降）→ 证明 4.12 的结论**不可迁移** | `corpus_medical/` + `run_ir --corpus corpus_medical` | 4.13 |
+| 30 | **修复两处"默认配置即崩"的缺陷**（实机启动时暴露）：提示词含两条 system（`ChatTongyi` 拒绝，502）、默认模型 `qwen3-max` 在该 Key 下 404（改 `qwen-max` 并支持 `CHAT_MODEL_NAME` 覆盖） | 修复后默认配置端到端问答实测通过；119 条单测全绿 | 5.10 |
 | 25 | **CI 建成，且把"不跑什么"写进 job summary**：IR 不进 CI（向量腿会随机变红）、RAGAS 不进 CI（需 Key）；这段声明由脚本生成并有 9 条测试钉住，防它腐化后被误读成"全都过了" | `.github/workflows/tests.yml` + `scripts/ci_summary.py` + `tests/test_ci_summary.py` | 5.8.3 |
 
 这 25 条的共同点：**结论都配了可复现的证据，并且把局限写在结论旁边。**
