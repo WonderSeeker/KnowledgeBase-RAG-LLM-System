@@ -49,17 +49,37 @@ def get_string_md5(input_str:str ,encoding='utf-8'):
 def extract_text(file_bytes: bytes, filename: str, encoding: str = "utf-8") -> str:
     """从文件字节流中抽取纯文本
 
-    - .pdf：用 pypdf 逐页抽取文字（依赖 requirements.txt 里已有的 pypdf）
-    - 其它：按文本解码，先试 utf-8，失败再试 gbk（兼容中文 Windows 的 txt）
+    - .pdf ：用 pypdf 逐页抽取文字（只抽文字层，扫描件抽不出来）
+    - .docx：用 python-docx 抽段落 + 表格（表格按 "a | b | c" 保留，图片会丢）
+    - 其它 ：按文本解码，先试 utf-8，失败再试 gbk（兼容中文 Windows 的 txt）
 
     :param file_bytes: 文件原始字节
     :param filename: 文件名（用于判断类型）
     :param encoding: 文本文件的首选编码
     """
-    if filename.lower().endswith(".pdf"):
+    lower = filename.lower()
+
+    if lower.endswith(".pdf"):
         from pypdf import PdfReader
         reader = PdfReader(io.BytesIO(file_bytes))
         return "\n\n".join((page.extract_text() or "") for page in reader.pages)
+
+    # 改造：补 DOCX 支持（Word 2007+）。老的 .doc 二进制格式 python-docx 读不了，
+    # 需要在 Word 里另存为 .docx 或 .txt。
+    if lower.endswith(".docx"):
+        from docx import Document
+        doc = Document(io.BytesIO(file_bytes))
+        parts = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+        for table in doc.tables:                      # 表格按行拼成 "a | b | c"
+            for row in table.rows:
+                cells = [c.text.strip().replace("\n", " ") for c in row.cells]
+                if any(cells):
+                    parts.append(" | ".join(cells))
+        return "\n".join(parts)
+
+    if lower.endswith(".doc"):
+        raise ValueError("不支持旧版 .doc，请先另存为 .docx 或 .txt")
+
     try:
         return file_bytes.decode(encoding)
     except UnicodeDecodeError:

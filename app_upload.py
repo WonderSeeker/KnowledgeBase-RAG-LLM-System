@@ -15,8 +15,8 @@ st.title("知识库更新服务")
 
 # file_uploader
 uploader_file=st.file_uploader(
-    "请上传TXT / PDF文件",          # 改造：原项目仅支持 txt，这里补上 PDF（pypdf 解析）
-    type=['txt','pdf'],
+    "请上传TXT / PDF / DOCX文件",   # 改造：原项目仅支持 txt，这里逐步补上 PDF（pypdf）、DOCX（python-docx）
+    type=['txt','pdf','docx'],
     accept_multiple_files=False,   # False表示仅接受一个文件的上传
 )
 
